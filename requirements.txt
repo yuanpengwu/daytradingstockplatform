@@ -1,0 +1,24 @@
+# ===== Core (always required) =====
+numpy>=1.26
+pandas>=2.1
+pyyaml>=6.0
+python-dotenv>=1.0
+requests>=2.31
+yfinance>=0.2.40
+
+# ===== Broker (required for Alpaca paper/live trading) =====
+alpaca-py>=0.21
+
+# ===== Signal engines =====
+vaderSentiment>=3.3      # news-sentiment scoring
+feedparser>=6.0          # SEC EDGAR filing parser
+scikit-learn>=1.4        # ML signal model
+xgboost>=2.0             # ML signal model
+joblib>=1.3              # ML model save/load
+google-genai>=0.1        # Gemini API integration
+
+# ===== Dashboard =====
+streamlit>=1.34
+
+# ===== Optional =====
+# robin-stocks>=3.1      # uncomment ONLY if using the (unofficial) Robinhood broker

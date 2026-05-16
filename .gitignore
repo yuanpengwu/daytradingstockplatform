@@ -1,0 +1,26 @@
+# Secrets
+.env
+
+# Caches
+__pycache__/
+*.pyc
+.pytest_cache/
+data_cache/
+models/*.joblib
+
+# Logs
+logs/*.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Generated runtime outputs
+status.html
+backtest_equity.html
+backtest_equity.csv

@@ -1,0 +1,94 @@
+# ============================================================
+#  DayTradingBot configuration
+# ============================================================
+
+broker:
+  name: paper                    # paper | alpaca | robinhood
+  starting_cash: 10000           # only used by paper broker
+  slippage_bps: 5                # simulated slippage for paper broker
+
+universe:
+  # Watch-list of tickers the bot will scan each cycle.
+  tickers:
+    - AAPL
+    - MSFT
+    - NVDA
+    - TSLA
+    - AMD
+    - META
+    - GOOGL
+    - AMZN
+    - SPY
+    - QQQ
+
+data:
+  provider: yfinance             # yfinance | polygon
+  bar_interval: 5m               # 1m, 5m, 15m, 1h, 1d
+  lookback_days: 30              # history to keep in memory for indicators
+
+signals:
+  # Weighted ensemble. Final score in [-1, +1].
+  # Positive => buy bias, negative => sell/short bias.
+  weights:
+    technical:   0.40
+    sentiment:   0.20
+    fundamental: 0.15
+    ml:          0.25
+
+  # Action thresholds on the aggregated score.
+  enter_long_threshold:   0.35
+  enter_short_threshold: -0.35   # ignored if shorting disabled
+  exit_threshold:         0.10   # absolute value below which we close
+
+  technical:
+    rsi_period: 14
+    rsi_oversold: 30
+    rsi_overbought: 70
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    bb_period: 20
+    bb_std: 2.0
+    ema_short: 9
+    ema_long: 21
+    use_vwap: true
+    atr_period: 14
+
+  sentiment:
+    sources: [newsapi, finnhub]
+    max_age_minutes: 120         # ignore stale headlines
+    model: vader                 # vader | finbert (requires transformers)
+
+  fundamental:
+    sec_filing_types: ["8-K", "10-Q", "10-K", "4"]    # 4 = insider trades
+    earnings_window_days: 3      # avoid new positions near earnings
+
+  ml:
+    model_path: models/xgb_intraday.joblib
+    retrain_on_startup: false
+    prediction_horizon_minutes: 15
+    min_confidence: 0.55
+
+risk:
+  max_position_pct: 0.10         # never put >10% of equity in one ticker
+  max_total_exposure_pct: 0.80   # never deploy >80% of equity
+  max_concurrent_positions: 5
+  daily_loss_limit_pct: 0.03     # kill switch: stop trading for the day after -3%
+  per_trade_stop_loss_pct: 0.02  # 2% hard stop
+  take_profit_pct: 0.04          # 4% take profit (2R)
+  trailing_stop_pct: 0.015       # 1.5% trailing stop once in profit
+  use_atr_stops: true            # if true, override % stops with 2x ATR
+  shorting_enabled: false
+  pdt_protection: true           # block trades that would trigger PDT rule
+  kelly_fraction: 0.25           # fractional-Kelly sizing (0.25 = quarter-Kelly)
+
+schedule:
+  poll_seconds: 60               # how often the main loop runs during market hours
+  market_open_buffer_minutes: 5  # don't trade in the opening N minutes
+  market_close_buffer_minutes: 10 # flatten all positions N minutes before close
+  trade_only_market_hours: true
+
+notifications:
+  on_trade: true
+  on_kill_switch: true
+  channels: [console]            # console | telegram | discord
