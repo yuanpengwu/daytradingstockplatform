@@ -1,2 +1,2 @@
-web: python -m streamlit run src/dashboard/app.py --server.port $PORT --server.address 0.0.0.0
+web: uvicorn src.dashboard.api:app --host 0.0.0.0 --port $PORT
 worker: python main.py --broker alpaca

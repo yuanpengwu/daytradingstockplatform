@@ -138,5 +138,39 @@ def write_status_page(
 </body></html>"""
 
         Path(path).write_text(html, encoding="utf-8")
+        
+        # ----- write JSON for frontend -----
+        import json
+        state = {
+            "updated_at": now.isoformat(),
+            "cycle_count": cycle_count,
+            "uptime_seconds": int((now - started_at).total_seconds()) if started_at else 0,
+            "equity": equity,
+            "cash": cash,
+            "market_value": market_value,
+            "unrealized_pnl": unrealized,
+            "kill_switch": kill_switch,
+            "positions": [
+                {
+                    "symbol": sym,
+                    "qty": p.qty,
+                    "avg_entry_price": p.avg_entry_price,
+                    "current_price": p.current_price,
+                    "market_value": p.market_value,
+                    "unrealized_pnl": p.unrealized_pnl,
+                    "unrealized_pnl_pct": p.unrealized_pnl_pct
+                } for sym, p in positions.items()
+            ],
+            "decisions": [
+                {
+                    "symbol": sym,
+                    "score": d.score,
+                    "confidence": d.confidence,
+                    "action": d.action
+                } for sym, d in (decisions or {}).items()
+            ]
+        }
+        Path(path.replace(".html", ".json")).write_text(json.dumps(state), encoding="utf-8")
+        
     except Exception as e:
         log.warning("Failed to write status page: %s", e)
