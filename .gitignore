@@ -22,5 +22,6 @@ env/
 
 # Generated runtime outputs
 status.html
+status.json
 backtest_equity.html
 backtest_equity.csv

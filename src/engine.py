@@ -117,6 +117,16 @@ class TradingEngine:
         now_ny = datetime.now(NY)
         if self.market_hours_only and not self._within_trading_window(now_ny):
             log.debug("Outside trading window (%s NY); skipping.", now_ny.time())
+            self._cycle_count += 1
+            write_status_page(
+                self.status_path,
+                broker=self.broker,
+                decisions={},
+                cycle_count=self._cycle_count,
+                started_at=self._started_at,
+                refresh_seconds=max(10, self.poll_seconds),
+                kill_switch=self.risk.kill_switch_engaged(),
+            )
             return {}
 
         # Daily kick-off
