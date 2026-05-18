@@ -34,22 +34,26 @@ interface StatusData {
 function App() {
   const [data, setData] = useState<StatusData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [apiOffline, setApiOffline] = useState(false);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
         const res = await fetch('/api/status');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
+        setApiOffline(false);
         setData(json);
       } catch (e) {
         console.error("Failed to fetch status:", e);
+        setApiOffline(true);
       } finally {
         setLoading(false);
       }
     };
-    
+
     fetchData();
-    const interval = setInterval(fetchData, 5000); // Poll every 5s
+    const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -69,6 +73,12 @@ function App() {
   };
 
   if (loading && !data) return <div className="loader">Loading...</div>;
+  if (apiOffline) return (
+    <div className="error-screen">
+      <h2>Backend Offline</h2>
+      <p>Cannot reach the API at <code>/api/status</code>. Start the FastAPI backend and refresh.</p>
+    </div>
+  );
   if (data?.error) return <div className="error-screen">{data.error}</div>;
 
   return (

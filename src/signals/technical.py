@@ -50,6 +50,15 @@ class TechnicalSignal:
         vwap_pos = self._vwap_position(high, low, close, volume) if self.cfg.get("use_vwap", True) else 0.0
         atr = self._atr(high, low, close, self.cfg.get("atr_period", 14))
 
+        price_level = float(close.iloc[-1]) if float(close.iloc[-1]) > 0 else 1.0
+        atr_val = float(atr.iloc[-1]) if not atr.empty else 0.0
+        atr_pct = atr_val / price_level  # ATR as fraction of price
+
+        # Volume surge: compare latest bar to 20-bar rolling average
+        vol_avg = float(volume.tail(20).mean()) if len(volume) >= 2 else 1.0
+        vol_ratio = float(volume.iloc[-1]) / vol_avg if vol_avg > 0 else 1.0
+        price_chg = (float(close.iloc[-1]) - float(close.iloc[-2])) / float(close.iloc[-2]) if len(close) > 1 else 0.0
+
         last = {
             "rsi": float(rsi.iloc[-1]) if not rsi.empty else 50.0,
             "macd_hist": float(macd_hist.iloc[-1]) if not macd_hist.empty else 0.0,
@@ -57,7 +66,9 @@ class TechnicalSignal:
             "bb_pct": float(bb_pct.iloc[-1]) if not bb_pct.empty else 0.5,
             "ema_cross": float(ema_cross),
             "vwap_pos": float(vwap_pos),
-            "atr": float(atr.iloc[-1]) if not atr.empty else 0.0,
+            "atr": atr_val,
+            "atr_pct": round(atr_pct, 5),
+            "vol_ratio": round(vol_ratio, 2),
         }
 
         # ----- scoring -----
@@ -71,12 +82,13 @@ class TechnicalSignal:
         elif last["rsi"] > rsi_overbought:
             scores.append(-(last["rsi"] - rsi_overbought) / (100 - rsi_overbought))
         else:
-            # Neutral zone: small bias toward the side of 50
             scores.append((50 - last["rsi"]) / 100.0)
 
-        # MACD histogram: positive & rising => bullish
+        # MACD: normalize histogram by price so high-priced stocks don't dominate tanh saturation.
         macd_change = last["macd_hist"] - last["macd_hist_prev"]
-        macd_score = np.tanh(last["macd_hist"] * 5) * 0.5 + np.tanh(macd_change * 10) * 0.5
+        macd_norm = last["macd_hist"] / price_level
+        macd_change_norm = macd_change / price_level
+        macd_score = np.tanh(macd_norm * 500) * 0.5 + np.tanh(macd_change_norm * 1000) * 0.5
         scores.append(float(macd_score))
 
         # Bollinger %B: <0 below lower band (oversold), >1 above upper (overbought)
@@ -93,11 +105,19 @@ class TechnicalSignal:
         # VWAP position
         scores.append(last["vwap_pos"])
 
+        # Volume surge in direction of price move — confirms or questions other signals.
+        # Vol ratio >1.5 with price up = strong bull confirmation; with price down = bear.
+        vol_direction = float(np.sign(price_chg)) if abs(price_chg) > 0 else 0.0
+        vol_score = float(np.tanh(vol_ratio - 1.0)) * vol_direction
+        scores.append(vol_score)
+
         score = float(np.clip(np.mean(scores), -1.0, 1.0))
 
-        # Confidence rises with magnitude + cross-signal agreement.
-        agreement = 1.0 - float(np.std(scores)) if scores else 0.0
-        confidence = float(np.clip(0.4 + abs(score) * 0.4 + agreement * 0.2, 0.0, 1.0))
+        # Confidence: magnitude + cross-signal agreement + volume surge boost.
+        # Lower baseline (0.3) to avoid inflating weak signals.
+        agreement = max(0.0, 1.0 - float(np.std(scores))) if scores else 0.0
+        vol_boost = min(0.08, (vol_ratio - 1.5) * 0.05) if vol_ratio > 1.5 else 0.0
+        confidence = float(np.clip(0.3 + abs(score) * 0.45 + agreement * 0.17 + vol_boost, 0.0, 1.0))
 
         return Signal(
             symbol=symbol,
