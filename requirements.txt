@@ -16,6 +16,7 @@ scikit-learn>=1.4        # ML signal model
 xgboost>=2.0             # ML signal model
 joblib>=1.3              # ML model save/load
 google-genai>=0.1        # Gemini API integration
+anthropic>=0.40          # Claude fallback for LM scoring
 
 # ===== Dashboard =====
 fastapi>=0.100.0

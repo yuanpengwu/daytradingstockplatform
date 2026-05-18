@@ -64,7 +64,8 @@ signals:
 
   fundamental:
     sec_filing_types: ["8-K", "10-Q", "10-K", "4"]    # 4 = insider trades
-    earnings_window_days: 3      # avoid new positions near earnings
+    earnings_window_days: 3      # suppress signal if 10-Q/10-K filed within this many days
+    lookback_hours: 48           # how far back to pull SEC filings
 
   ml:
     model_path: models/xgb_intraday.joblib

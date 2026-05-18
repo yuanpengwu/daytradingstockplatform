@@ -50,13 +50,74 @@ python main.py --broker paper
 # 2. Backtest the strategy on history before risking real money
 python run_backtest.py --start 2024-01-01 --end 2024-12-31
 
-# 3. Live dashboard (separate terminal)
-streamlit run src/dashboard/app.py
+# 3. Start the dashboard (see full tutorial below)
+uvicorn src.dashboard.api:app --host 127.0.0.1 --port 8000
 
 # 4. Go live (after thorough paper testing)
 python main.py --broker alpaca         # recommended
 python main.py --broker robinhood      # unofficial API — see warning below
 ```
+
+## Starting the dashboard
+
+The dashboard is a **React frontend** served by a **FastAPI backend**.
+You have two options depending on whether you want to develop the UI or just run it.
+
+### Option A — Production (recommended, single command)
+
+Build the React app once, then FastAPI serves everything on one port:
+
+```bash
+# Step 1 — build the frontend (only needed after UI changes)
+cd frontend
+npm install
+npm run build
+cd ..
+
+# Step 2 — start the API server (also serves the built UI)
+uvicorn src.dashboard.api:app --host 127.0.0.1 --port 8000
+```
+
+Open **http://localhost:8000** in your browser.
+The trading bot must also be running to see live data:
+
+```bash
+# In a second terminal
+python main.py --broker alpaca
+```
+
+### Option B — Development (hot-reload UI)
+
+Run the backend and the Vite dev server side-by-side so UI changes
+appear instantly without rebuilding:
+
+```bash
+# Terminal 1 — FastAPI backend
+uvicorn src.dashboard.api:app --host 127.0.0.1 --port 8000 --reload
+
+# Terminal 2 — React dev server (proxies /api → localhost:8000)
+cd frontend
+npm install       # skip after first run
+npm run dev
+
+# Terminal 3 — trading bot
+python main.py --broker alpaca
+```
+
+Open **http://localhost:5173** for the hot-reloading dev UI.
+
+### Environment variables
+
+Copy `.env.example` to `.env` and fill in your keys before starting:
+
+| Variable | Required | Description |
+|---|---|---|
+| `ALPACA_API_KEY` | Yes (live/paper) | Alpaca trading key |
+| `ALPACA_SECRET_KEY` | Yes (live/paper) | Alpaca secret |
+| `GEMINI_API_KEY` | Recommended | Primary LLM signal provider |
+| `ANTHROPIC_API_KEY` | Recommended | Claude fallback when Gemini quota is exhausted |
+| `NEWSAPI_KEY` | Optional | News sentiment headlines |
+| `FINNHUB_API_KEY` | Optional | Additional news source |
 
 ## ⚠️ Important warnings
 
@@ -93,7 +154,7 @@ src/
 ├── risk/           Position sizing, stops, kill switches
 ├── execution/      Order placement, position tracking
 ├── backtest/       Vectorized historical evaluation
-├── dashboard/      Streamlit live monitor
+├── dashboard/      FastAPI backend + React frontend (served from frontend/dist)
 ├── utils/          Logging, notifications
 └── engine.py       Main orchestration loop
 ```
