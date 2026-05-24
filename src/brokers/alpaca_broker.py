@@ -152,11 +152,31 @@ class AlpacaBroker(BrokerBase):
                       order.side.value, order.qty, order.symbol, e)
             order.status = OrderStatus.REJECTED
             return order
+
         order.id = str(resp.id)
         order.status = _map_alpaca_status(resp.status.value) if resp.status else OrderStatus.PENDING
         order.filled_qty = float(resp.filled_qty or 0)
         order.filled_avg_price = float(resp.filled_avg_price) if resp.filled_avg_price else None
-        log.info("Alpaca %s %s %s -> %s", order.side.value, order.qty, order.symbol, order.status.value)
+
+        # Alpaca market orders fill asynchronously — the initial response is
+        # "new" or "accepted", not "filled". Poll once after a short delay so
+        # the caller sees the true fill status and fill price, which is required
+        # for notifications and trade history to fire correctly.
+        if order.type == OrderType.MARKET and order.status == OrderStatus.PENDING:
+            time.sleep(2)
+            try:
+                updated = self._client.get_order_by_id(order.id)
+                order.status = _map_alpaca_status(updated.status.value) if updated.status else order.status
+                order.filled_qty = float(updated.filled_qty or order.filled_qty)
+                if updated.filled_avg_price:
+                    order.filled_avg_price = float(updated.filled_avg_price)
+            except Exception as e:
+                log.warning("Could not refresh fill status for order %s (%s): %s",
+                            order.id, order.symbol, e)
+
+        log.info("Alpaca %s %s %s -> %s (filled_qty=%s avg_px=%s)",
+                 order.side.value, order.qty, order.symbol, order.status.value,
+                 order.filled_qty, order.filled_avg_price)
         return order
 
     def cancel_order(self, order_id: str) -> None:

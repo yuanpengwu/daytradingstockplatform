@@ -4,6 +4,12 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from ..utils.trade_history import TradeHistory
+
+# Resolve the project root regardless of the CWD at startup
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_TRADES_PATH  = _PROJECT_ROOT / "trades.json"
+_STATUS_PATH  = _PROJECT_ROOT / "status.json"
 
 app = FastAPI(title="DayTradingBot API")
 
@@ -15,12 +21,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/api/winrate")
+def get_winrate():
+    return TradeHistory(path=str(_TRADES_PATH)).win_rate_summary()
+
+
 @app.get("/api/status")
 def get_status():
-    p = Path("status.json")
-    if not p.exists():
+    if not _STATUS_PATH.exists():
         return {"error": "No status yet. Ensure main.py is running."}
-    with open(p) as f:
+    with open(_STATUS_PATH) as f:
         return json.load(f)
 
 class SellRequest(BaseModel):
