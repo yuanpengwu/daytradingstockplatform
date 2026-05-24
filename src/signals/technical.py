@@ -59,6 +59,13 @@ class TechnicalSignal:
         vol_ratio = float(volume.iloc[-1]) / vol_avg if vol_avg > 0 else 1.0
         price_chg = (float(close.iloc[-1]) - float(close.iloc[-2])) / float(close.iloc[-2]) if len(close) > 1 else 0.0
 
+        # Short-term momentum: return over last 6 bars (~30 min on 5m)
+        mom_bars = min(6, len(close) - 1)
+        momentum_return = (
+            (float(close.iloc[-1]) - float(close.iloc[-mom_bars])) / float(close.iloc[-mom_bars])
+            if mom_bars > 0 and float(close.iloc[-mom_bars]) > 0 else 0.0
+        )
+
         last = {
             "rsi": float(rsi.iloc[-1]) if not rsi.empty else 50.0,
             "macd_hist": float(macd_hist.iloc[-1]) if not macd_hist.empty else 0.0,
@@ -69,29 +76,43 @@ class TechnicalSignal:
             "atr": atr_val,
             "atr_pct": round(atr_pct, 5),
             "vol_ratio": round(vol_ratio, 2),
+            "momentum_6b": round(momentum_return, 6),
         }
 
         # ----- scoring -----
+        # Seven sub-scores, each in [-1, +1].  Averaged to produce final score.
+        #
+        # Calibration targets (5-min bars on $100-$500 stocks):
+        #   Strong entry signal  → score ~0.40-0.70
+        #   Moderate signal      → score ~0.20-0.40
+        #   Noisy / sideways     → score <0.15  (below default threshold)
         scores = []
 
-        # RSI: oversold => bullish, overbought => bearish
-        rsi_oversold = self.cfg.get("rsi_oversold", 30)
+        # 1. RSI — extreme levels fire strongly; neutral zone gives a mild
+        #    momentum-following nudge (RSI>50 → slight bull, RSI<50 → slight bear).
+        #    Old formula used (50-rsi)/100 which *opposed* momentum in neutral
+        #    zone — that suppressed trend-following signals.
+        rsi_oversold  = self.cfg.get("rsi_oversold",  30)
         rsi_overbought = self.cfg.get("rsi_overbought", 70)
         if last["rsi"] < rsi_oversold:
             scores.append((rsi_oversold - last["rsi"]) / rsi_oversold)
         elif last["rsi"] > rsi_overbought:
             scores.append(-(last["rsi"] - rsi_overbought) / (100 - rsi_overbought))
         else:
-            scores.append((50 - last["rsi"]) / 100.0)
+            # Mild trend-following in neutral zone: RSI 60 → +0.06, RSI 40 → −0.06
+            scores.append((last["rsi"] - 50) / 50.0 * 0.3)
 
-        # MACD: normalize histogram by price so high-priced stocks don't dominate tanh saturation.
+        # 2. MACD histogram — normalised by price level.
+        #    Multiplier 2500/5000 (was 500/1000) gives meaningful scores for
+        #    typical intraday MACD magnitudes on $100-$500 stocks:
+        #      hist=0.05 on $300 stock → tanh(0.05/300*2500) = tanh(0.42) = 0.40
         macd_change = last["macd_hist"] - last["macd_hist_prev"]
         macd_norm = last["macd_hist"] / price_level
         macd_change_norm = macd_change / price_level
-        macd_score = np.tanh(macd_norm * 500) * 0.5 + np.tanh(macd_change_norm * 1000) * 0.5
+        macd_score = np.tanh(macd_norm * 2500) * 0.5 + np.tanh(macd_change_norm * 5000) * 0.5
         scores.append(float(macd_score))
 
-        # Bollinger %B: <0 below lower band (oversold), >1 above upper (overbought)
+        # 3. Bollinger %B — mean-reversion signal.
         if last["bb_pct"] < 0:
             scores.append(min(1.0, -last["bb_pct"] * 2))
         elif last["bb_pct"] > 1:
@@ -99,25 +120,30 @@ class TechnicalSignal:
         else:
             scores.append((0.5 - last["bb_pct"]) * 0.4)
 
-        # EMA cross: +1 if short > long, -1 otherwise, scaled by separation
+        # 4. EMA cross — multiplier 250 (was 50); diff=0.1% → tanh(0.5)=0.46.
         scores.append(last["ema_cross"])
 
-        # VWAP position
+        # 5. VWAP position — multiplier 250 (was 50); same calibration as EMA.
         scores.append(last["vwap_pos"])
 
-        # Volume surge in direction of price move — confirms or questions other signals.
-        # Vol ratio >1.5 with price up = strong bull confirmation; with price down = bear.
+        # 6. Volume surge in direction of price move.
         vol_direction = float(np.sign(price_chg)) if abs(price_chg) > 0 else 0.0
         vol_score = float(np.tanh(vol_ratio - 1.0)) * vol_direction
         scores.append(vol_score)
 
+        # 7. Short-term price momentum (6-bar return, ~30 min).
+        #    0.1% move → tanh(0.001*300)=0.29;  0.5% → tanh(0.005*300)=0.91
+        #    Captures slow intraday trends invisible to oscillators.
+        momentum_score = float(np.tanh(momentum_return * 300))
+        scores.append(momentum_score)
+
         score = float(np.clip(np.mean(scores), -1.0, 1.0))
 
-        # Confidence: magnitude + cross-signal agreement + volume surge boost.
-        # Lower baseline (0.3) to avoid inflating weak signals.
+        # Confidence: cross-signal agreement + volume surge boost.
+        # Baseline raised to 0.35 since we now have 7 well-calibrated signals.
         agreement = max(0.0, 1.0 - float(np.std(scores))) if scores else 0.0
         vol_boost = min(0.08, (vol_ratio - 1.5) * 0.05) if vol_ratio > 1.5 else 0.0
-        confidence = float(np.clip(0.3 + abs(score) * 0.45 + agreement * 0.17 + vol_boost, 0.0, 1.0))
+        confidence = float(np.clip(0.35 + abs(score) * 0.40 + agreement * 0.15 + vol_boost, 0.0, 1.0))
 
         return Signal(
             symbol=symbol,
@@ -160,7 +186,7 @@ class TechnicalSignal:
         if len(es) == 0 or len(el) == 0:
             return 0.0
         diff = (es.iloc[-1] - el.iloc[-1]) / el.iloc[-1]
-        return float(np.tanh(diff * 50))
+        return float(np.tanh(diff * 250))
 
     @staticmethod
     def _vwap_position(high: pd.Series, low: pd.Series, close: pd.Series, vol: pd.Series) -> float:
@@ -172,7 +198,7 @@ class TechnicalSignal:
             return 0.0
         diff = (close.iloc[-1] - vwap.iloc[-1]) / vwap.iloc[-1]
         # Above VWAP => bullish bias for momentum / day-trading
-        return float(np.tanh(diff * 50))
+        return float(np.tanh(diff * 250))
 
     @staticmethod
     def _atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> pd.Series:
