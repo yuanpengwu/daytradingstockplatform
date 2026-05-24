@@ -25,3 +25,6 @@ status.html
 status.json
 backtest_equity.html
 backtest_equity.csv
+
+# Claude Code local config (machine-specific, not for source control)
+.claude/
