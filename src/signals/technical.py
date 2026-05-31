@@ -140,10 +140,17 @@ class TechnicalSignal:
         score = float(np.clip(np.mean(scores), -1.0, 1.0))
 
         # Confidence: cross-signal agreement + volume surge boost.
-        # Baseline raised to 0.35 since we now have 7 well-calibrated signals.
+        # Floor lowered to 0.15 so weak signals (score ~0.1) must earn confidence
+        # through agreement and magnitude — the old 0.35 floor let garbage signals
+        # inflate the aggregate confidence past the min_confidence gate.
+        #
+        # Calibration:
+        #   score=0.15, low agreement  → ~0.22  (below min_confidence=0.50 → won't fire)
+        #   score=0.40, good agreement → ~0.53  (just above gate)
+        #   score=0.70, high agreement → ~0.80  (strong entry)
         agreement = max(0.0, 1.0 - float(np.std(scores))) if scores else 0.0
-        vol_boost = min(0.08, (vol_ratio - 1.5) * 0.05) if vol_ratio > 1.5 else 0.0
-        confidence = float(np.clip(0.35 + abs(score) * 0.40 + agreement * 0.15 + vol_boost, 0.0, 1.0))
+        vol_boost = min(0.10, (vol_ratio - 1.5) * 0.06) if vol_ratio > 1.5 else 0.0
+        confidence = float(np.clip(0.15 + abs(score) * 0.50 + agreement * 0.30 + vol_boost, 0.0, 1.0))
 
         return Signal(
             symbol=symbol,

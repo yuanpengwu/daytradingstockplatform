@@ -14,6 +14,7 @@ class SignalSource(str, Enum):
     ML = "ml"
     ORB = "orb"
     VWAP_BOUNCE = "vwap_bounce"
+    FINRL = "finrl"
 
 
 @dataclass

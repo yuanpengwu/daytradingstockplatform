@@ -1,14 +1,160 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
-    <script type="module" crossorigin src="/assets/index-B2qBfev3.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-wCBX39eR.css">
-  </head>
-  <body>
-    <div id="root"></div>
-  </body>
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate"/>
+  <meta http-equiv="Pragma" content="no-cache"/>
+  <meta http-equiv="Expires" content="0"/>
+  <title>DayTradingBot PRO</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:system-ui,Segoe UI,Arial,sans-serif;background:#0f1115;color:#e6e6e6;padding:20px}
+    header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}
+    .logo h1{font-size:22px;font-weight:700}.logo h1 span.pro{color:#58a6ff;font-size:14px;margin-left:6px}
+    .live{background:#238636;color:#fff;font-size:11px;padding:2px 8px;border-radius:10px;margin-left:8px}
+    .updated{font-size:12px;color:#8b8f98;margin-top:4px}
+    .btn-danger{background:#da3633;color:#fff;border:none;padding:8px 18px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:600}
+    .btn-danger:hover{background:#b62324}
+    .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+    .card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px}
+    .card .label{font-size:12px;color:#8b8f98;text-transform:uppercase;letter-spacing:.5px}
+    .card .value{font-size:24px;font-weight:700;margin-top:6px}
+    .grid2{display:grid;grid-template-columns:1fr 2fr;gap:16px}
+    .panel{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px}
+    .panel h2{font-size:14px;font-weight:600;color:#c9d1d9;margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .panel h2 .hint{font-size:11px;color:#8b8f98;font-weight:400}
+    table{width:100%;border-collapse:collapse}
+    th{text-align:left;padding:7px 10px;font-size:11px;color:#8b8f98;font-weight:500;border-bottom:1px solid #21262d;white-space:nowrap}
+    td{padding:7px 10px;font-size:13px;border-bottom:1px solid #21262d}
+    tr:last-child td{border-bottom:none}
+    tr.hot td{background:rgba(35,134,54,.06)}
+    .pos{color:#3fb950}.neg{color:#f85149}.muted{color:#8b8f98}
+    .badge{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:600}
+    .badge.hold{background:#21262d;color:#8b8f98}
+    .badge.buy{background:#238636;color:#fff}
+    .badge.sell{background:#da3633;color:#fff}
+    .regime{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:600}
+    .regime.bull{background:#1a3a20;color:#3fb950}
+    .regime.choppy{background:#2d2a14;color:#e3b341}
+    .regime.bear{background:#3d1418;color:#f85149}
+    .bar{display:inline-block;height:5px;border-radius:3px;margin-left:4px;vertical-align:middle;opacity:.7}
+    #error-box{background:#3d1418;color:#f85149;padding:10px 14px;border-radius:8px;margin-bottom:14px;display:none}
+    #kill-box{background:#3d1418;color:#f85149;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-weight:600;display:none}
+    @media(max-width:900px){.metrics{grid-template-columns:repeat(2,1fr)}.grid2{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<div id="kill-box">🚨 KILL SWITCH ENGAGED — daily loss limit hit, trading halted for today.</div>
+<div id="error-box"></div>
+
+<header>
+  <div class="logo">
+    <h1>DayTradingBot <span class="pro">PRO</span> <span class="live">LIVE</span></h1>
+    <div class="updated" id="updated">Connecting…</div>
+  </div>
+  <button class="btn-danger" onclick="emergencySell()">🚨 EMERGENCY SELL ALL</button>
+</header>
+
+<div class="metrics">
+  <div class="card"><div class="label">Total Equity</div><div class="value" id="equity">—</div></div>
+  <div class="card"><div class="label">Cash Available</div><div class="value" id="cash">—</div></div>
+  <div class="card"><div class="label">Invested</div><div class="value" id="invested">—</div></div>
+  <div class="card"><div class="label">Open P&L</div><div class="value" id="pnl">—</div></div>
+</div>
+
+<div class="grid2">
+  <div class="panel">
+    <h2>Open Positions <span class="hint" id="pos-count"></span></h2>
+    <div id="positions"><p class="muted" style="font-size:13px">No open positions.</p></div>
+  </div>
+  <div class="panel">
+    <h2>
+      Live Signal Scores
+      <span class="hint">≥ 0.50 × 2 bars to enter</span>
+      <span class="regime" id="regime-badge"></span>
+    </h2>
+    <div id="signals"><p class="muted" style="font-size:13px">Waiting for first cycle…</p></div>
+  </div>
+</div>
+
+<script>
+const g = id => document.getElementById(id);
+const fmt$ = n => '$' + (+n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtS = n => (n>=0?'+':'')+n.toFixed(3);
+const fmtC = n => (n==null||n==undefined) ? '—' : (n>=0?'+':'')+n.toFixed(3);
+const cls  = n => n>0.003?'pos':n<-0.003?'neg':'muted';
+
+async function load(){
+  try{
+    const r = await fetch('/api/status?t='+Date.now());
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d = await r.json();
+    if(d.error){ g('error-box').style.display='block'; g('error-box').textContent=d.error; return; }
+    g('error-box').style.display='none';
+
+    const t = new Date(d.updated_at);
+    g('updated').textContent = 'Updated ' + t.toLocaleTimeString() + '  ·  cycle #' + (d.cycle_count||0);
+    g('kill-box').style.display = d.kill_switch ? 'block' : 'none';
+
+    g('equity').textContent   = fmt$(d.equity);
+    g('cash').textContent     = fmt$(d.cash);
+    g('invested').textContent = fmt$(d.market_value||0);
+    const pnl = d.unrealized_pnl||0;
+    g('pnl').innerHTML = '<span class="'+(pnl>=0?'pos':'neg')+'">'+fmt$(pnl)+'</span>';
+
+    const regime = (d.regime||'').toLowerCase();
+    const rb = g('regime-badge');
+    rb.textContent  = d.regime || '';
+    rb.className = 'regime ' + (regime.includes('bull') ? 'bull' : regime.includes('bear') ? 'bear' : 'choppy');
+
+    // Positions
+    const pos = d.positions||[];
+    g('pos-count').textContent = pos.length ? '('+pos.length+' open)' : '';
+    if(!pos.length){
+      g('positions').innerHTML = '<p class="muted" style="font-size:13px">No open positions.</p>';
+    } else {
+      let h = '<table><thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Last</th><th>Value</th><th>P&L</th></tr></thead><tbody>';
+      for(const p of pos){
+        const c = p.unrealized_pnl>=0?'pos':'neg';
+        h += `<tr><td><strong>${p.symbol}</strong></td><td>${p.qty}</td><td>${fmt$(p.avg_entry_price)}</td><td>${fmt$(p.current_price)}</td><td>${fmt$(p.market_value)}</td><td class="${c}">${fmt$(p.unrealized_pnl)} (${((p.unrealized_pnl_pct||0)*100).toFixed(2)}%)</td></tr>`;
+      }
+      g('positions').innerHTML = h + '</tbody></table>';
+    }
+
+    // Decisions
+    const decs = (d.decisions||[]).slice().sort((a,b)=>b.score-a.score);
+    if(!decs.length){
+      g('signals').innerHTML = '<p class="muted" style="font-size:13px">No signals yet.</p>';
+    } else {
+      let h = '<table><thead><tr><th>Symbol</th><th>Score</th><th>Conf</th><th>Tech</th><th>Sent</th><th>ORB</th><th>VWAP</th><th>Action</th></tr></thead><tbody>';
+      for(const dec of decs){
+        const c   = dec.components||{};
+        const hot = dec.score >= 0.40;
+        const sc  = dec.score>=0.50?'pos':dec.score<=-0.50?'neg':'';
+        const bw  = Math.min(Math.abs(dec.score)*55, 55);
+        const bc  = dec.score>=0 ? '#3fb950' : '#f85149';
+        h += `<tr${hot?' class="hot"':''}>
+          <td><strong>${dec.symbol}</strong></td>
+          <td class="${sc}"><strong>${fmtS(dec.score)}</strong><span class="bar" style="width:${bw}px;background:${bc}"></span></td>
+          <td>${dec.confidence.toFixed(2)}</td>
+          <td class="${cls(c.technical)}">${fmtC(c.technical)}</td>
+          <td class="${cls(c.sentiment)}">${fmtC(c.sentiment)}</td>
+          <td class="${cls(c.orb)}">${fmtC(c.orb)}</td>
+          <td class="${cls(c.vwap_bounce)}">${fmtC(c.vwap_bounce)}</td>
+          <td><span class="badge ${dec.action.toLowerCase()}">${dec.action}</span></td>
+        </tr>`;
+      }
+      g('signals').innerHTML = h + '</tbody></table>';
+    }
+  } catch(e){
+    g('error-box').style.display = 'block';
+    g('error-box').textContent = 'Connection error: ' + e.message;
+  }
+}
+
+load();
+setInterval(load, 5000);
+</script>
+</body>
 </html>

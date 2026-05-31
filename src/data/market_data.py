@@ -22,10 +22,14 @@ log = get_logger(__name__)
 class MarketData:
     """Fetches and caches OHLCV bars per ticker."""
 
-    def __init__(self, provider: str = "alpaca", interval: str = "5m", lookback_days: int = 30):
+    def __init__(self, provider: str = "alpaca", interval: str = "5m", lookback_days: int = 30,
+                 feed: str = "iex"):
         self.provider = provider.lower()
         self.interval = interval
         self.lookback_days = lookback_days
+        # Data feed: "iex" for free/paper accounts, "sip" for live accounts
+        # with Algo Trader Plus subscription (full consolidated tape).
+        self.feed = feed.lower()
         self._cache: Dict[str, pd.DataFrame] = {}
         self._cache_ts: Dict[str, datetime] = {}
         self._alpaca_client = None  # lazily created
@@ -88,12 +92,15 @@ class MarketData:
         return TimeFrame(5, TimeFrameUnit.Minute)
 
     def _fetch_alpaca(self, symbol: str) -> Optional[pd.DataFrame]:
-        """Fetch recent bars from Alpaca (IEX feed — works on free/paper accounts).
+        """Fetch recent bars from Alpaca.
 
-        Note: the free IEX feed cannot serve roughly the last 15 minutes of
-        data, so the most recent bar may lag the true market by a few minutes.
-        That is acceptable for paper trading and far more reliable than the
-        yfinance free endpoint.
+        Feed selection:
+          iex — free/paper accounts. Cannot serve roughly the last 15 minutes
+                of data; most recent bar may lag true market by a few minutes.
+                Acceptable for paper trading.
+          sip — full consolidated tape (NYSE + NASDAQ + all exchanges).
+                Requires Algo Trader Plus subscription ($99/mo). Use this for
+                live accounts to get accurate VWAP, prices, and stop levels.
         """
         try:
             from alpaca.data.requests import StockBarsRequest
@@ -101,6 +108,9 @@ class MarketData:
         except ImportError:
             log.warning("alpaca-py not installed; falling back to yfinance.")
             return self._fetch_yfinance(symbol)
+
+        feed_enum = DataFeed.SIP if self.feed == "sip" else DataFeed.IEX
+        log.debug("Alpaca data feed: %s", feed_enum)
 
         try:
             client = self._get_alpaca_client()
@@ -111,7 +121,7 @@ class MarketData:
                 timeframe=self._alpaca_timeframe(),
                 start=start,
                 end=end,
-                feed=DataFeed.IEX,
+                feed=feed_enum,
             )
             resp = client.get_stock_bars(req)
             df = resp.df

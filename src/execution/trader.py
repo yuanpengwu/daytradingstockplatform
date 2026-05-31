@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from ..brokers.base import BrokerBase, Order, OrderSide, OrderType, Position
+from ..risk.performance_tracker import SymbolPerformanceTracker
 from ..risk.risk_manager import RiskManager
 from ..signals.aggregator import AggregatedDecision
 from ..utils.logger import get_logger
@@ -55,13 +56,43 @@ class Trader:
         self._partial_exits: Dict[str, int] = {}   # 0 / 1 / 2 partials taken
         self._entry_qty: Dict[str, float] = {}     # original qty at entry for sizing
 
+        # Per-position regime params (set at entry by the engine's regime detector).
+        # Keys: pp1_pct, pp2_pct, eod_flatten (bool).
+        # TRENDING positions: pp1/pp2 = 9999 (never fire), eod_flatten = False.
+        # CHOPPY/NEUTRAL:     pp1/pp2 from config,         eod_flatten = True.
+        self._regime_params: Dict[str, dict] = {}
+
         # 4. Per-symbol daily loss streak filter
         self._max_daily_losses: int = int(rcfg.get("max_symbol_daily_losses", 2))
         self._symbol_daily_losses: Dict[str, int] = {}
 
+        # 4b. Dynamic exclusion: symbols with <33% win rate for 3 consecutive
+        #     trading days are removed from the universe until they recover.
+        self._perf_tracker = SymbolPerformanceTracker(
+            min_win_rate=float(rcfg.get("dynamic_exclusion_win_rate", 0.33)),
+            streak_limit=int(rcfg.get("dynamic_exclusion_streak_days", 3)),
+        )
+
+        # 5. Next-day cooloff — symbols that stopped out this cycle
+        #    Engine reads this after manage_open_positions and registers bans.
+        self.recent_stop_losses: set = set()
+
     # ---------- daily reset ----------
-    def begin_day(self) -> None:
-        """Reset per-day state. Must be called by the engine at day start."""
+    def begin_day(self, day_str: Optional[str] = None) -> None:
+        """Reset per-day state. Must be called by the engine at day start.
+
+        *day_str* ('YYYY-MM-DD') is the date of the day that just finished —
+        used to trigger performance-tracker end-of-day evaluation before the
+        new day's signals are processed.
+        """
+        if day_str:
+            self._perf_tracker.end_of_day(day_str)
+            st = self._perf_tracker.status()
+            if st["excluded"] or st["bad_streak"]:
+                log.warning(
+                    "PerfTracker EOD %s | excluded=%s | bad_streak=%s",
+                    day_str, st["excluded"], st["bad_streak"],
+                )
         self._day_open.clear()
         self._signal_history.clear()
         self._symbol_daily_losses.clear()
@@ -78,7 +109,12 @@ class Trader:
             log.debug("Day-open set %s = %.2f", symbol, open_price)
 
     # ---------- entries ----------
-    def handle_decision(self, dec: AggregatedDecision, atr: Optional[float]) -> None:
+    def handle_decision(
+        self,
+        dec: AggregatedDecision,
+        atr: Optional[float],
+        regime_params: Optional[dict] = None,
+    ) -> None:
         side = "buy" if dec.score > 0 else "sell"
         price = self.broker.get_last_price(dec.symbol)
         if price <= 0:
@@ -103,12 +139,16 @@ class Trader:
                 self._close_position(existing, reason)
             return
 
-        # ── Filter 1: per-symbol daily loss streak ─────────────────────────
+        # ── Filter 1: dynamic exclusion + per-symbol daily loss cap ──────────
+        if self._perf_tracker.is_excluded(dec.symbol):
+            log.info("SKIP %s — dynamically excluded (poor multi-day win rate).", dec.symbol)
+            return
+        eff_cap = self._perf_tracker.daily_loss_cap(dec.symbol, self._max_daily_losses)
         streak = self._symbol_daily_losses.get(dec.symbol, 0)
-        if streak >= self._max_daily_losses:
+        if streak >= eff_cap:
             log.info(
-                "SKIP %s — loss streak %d >= limit %d (blacklisted for today).",
-                dec.symbol, streak, self._max_daily_losses,
+                "SKIP %s — loss streak %d >= effective cap %d (today).",
+                dec.symbol, streak, eff_cap,
             )
             return
 
@@ -117,7 +157,11 @@ class Trader:
         hist.append(dec.score)
         if len(hist) > self._persistence_bars:
             hist.pop(0)
-        # Need N bars all on the same side as the current signal.
+        # Need N bars all on the same side AND above a minimum magnitude threshold.
+        # Checking only sign lets a decaying signal (e.g. +0.50 → +0.12) pass
+        # the filter and enter right before it reverses — the most common loss pattern.
+        # Require each bar's score to be at least 70 % of the entry threshold so
+        # the signal has been consistently strong, not merely positive.
         if len(hist) < self._persistence_bars:
             log.info(
                 "SKIP %s — persistence not met yet (%d/%d bars; need %d consecutive).",
@@ -129,6 +173,19 @@ class Trader:
             log.info(
                 "SKIP %s — signal flipped direction in last %d bars (not persistent).",
                 dec.symbol, self._persistence_bars,
+            )
+            return
+        # Use the correct threshold for the direction of the trade:
+        # longs compare against enter_long, shorts against abs(enter_short).
+        ref_thresh = dec.enter_long if dec.score > 0 else abs(dec.enter_short)
+        min_mag = ref_thresh * 0.70   # e.g. 0.45 × 0.70 = 0.315 for longs
+        strong_enough = all(abs(s) >= min_mag for s in hist)
+        if not strong_enough:
+            weakest = min(abs(s) for s in hist)
+            log.info(
+                "SKIP %s — score decaying (min=%.3f < %.3f threshold); "
+                "signal may be reversing.",
+                dec.symbol, weakest, min_mag,
             )
             return
 
@@ -174,6 +231,18 @@ class Trader:
             self._entry_time[dec.symbol] = datetime.now()
             self._entry_qty[dec.symbol] = filled_qty
             self._partial_exits[dec.symbol] = 0
+            # Store per-position regime params supplied by the engine.
+            if regime_params:
+                self._regime_params[dec.symbol] = regime_params
+                log.info(
+                    "ENTRY %s | regime=%s pp1=%.4f eod_flatten=%s",
+                    dec.symbol,
+                    regime_params.get("regime", "?"),
+                    regime_params.get("pp1_pct", self._partial_1_pct),
+                    regime_params.get("eod_flatten", True),
+                )
+            else:
+                self._regime_params.pop(dec.symbol, None)
             if self.trade_history is not None:
                 self.trade_history.log_entry(
                     symbol=dec.symbol,
@@ -199,6 +268,7 @@ class Trader:
     # ---------- exits ----------
     def manage_open_positions(self, aggregated: Dict[str, AggregatedDecision]) -> None:
         """Sweep current positions; fire partial exits, then full exits."""
+        self.recent_stop_losses.clear()   # reset each cycle; engine reads after this call
         positions = self.broker.get_positions()
         for sym, pos in positions.items():
             self._update_trailing_high(pos)
@@ -226,6 +296,24 @@ class Trader:
         for sym, pos in self.broker.get_positions().items():
             self._close_position(pos, reason)
 
+    def flatten_eod_eligible(self, reason: str = "eod_flatten") -> None:
+        """Close only positions that should be flattened at EOD.
+
+        TRENDING positions (eod_flatten=False) are skipped — they are
+        allowed to run overnight and exit via stop/TP/signal on a future cycle.
+        CHOPPY and NEUTRAL positions (eod_flatten=True, the default) are closed.
+        """
+        positions = self.broker.get_positions()
+        for sym, pos in positions.items():
+            rp = self._regime_params.get(sym, {})
+            if not rp.get("eod_flatten", True):
+                log.info(
+                    "EOD skip %s — TRENDING position, letting it run overnight.",
+                    sym,
+                )
+                continue
+            self._close_position(pos, reason)
+
     # ---------- partial exits ----------
     def _check_partial_exits(self, sym: str, pos: Position) -> bool:
         """Check and execute partial profit targets.
@@ -241,10 +329,15 @@ class Trader:
         if partial_level >= 2:
             return False  # both partials already taken
 
+        # Use per-position thresholds if set (regime routing), else global defaults.
+        rp = self._regime_params.get(sym, {})
+        pp1_pct = rp.get("pp1_pct", self._partial_1_pct)
+        pp2_pct = rp.get("pp2_pct", self._partial_2_pct)
+
         orig_qty = self._entry_qty.get(sym, pos.qty)
         sell_qty = max(1.0, round(orig_qty * 0.33))
 
-        if partial_level == 0 and pnl_pct >= self._partial_1_pct:
+        if partial_level == 0 and pnl_pct >= pp1_pct:
             # Don't sell more than we actually hold.
             sell_qty = min(sell_qty, int(pos.qty))
             if sell_qty >= 1:
@@ -252,7 +345,7 @@ class Trader:
                 self._partial_exits[sym] = 1
                 return True
 
-        elif partial_level == 1 and pnl_pct >= self._partial_2_pct:
+        elif partial_level == 1 and pnl_pct >= pp2_pct:
             sell_qty = min(sell_qty, int(pos.qty))
             if sell_qty >= 1:
                 self._execute_partial_exit(sym, sell_qty, "partial_profit_2", pos.avg_entry_price)
@@ -330,11 +423,18 @@ class Trader:
             )
             self.risk.record_day_trade()
 
-            # ── Per-symbol loss streak tracking ───────────────────────────
+            # ── Per-symbol loss streak tracking + performance recorder ────────
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            is_win    = realized_pnl_pct >= 0
+            self._perf_tracker.record_trade(position.symbol, today_str, is_win)
+
             if realized_pnl_pct < 0:
                 self._symbol_daily_losses[position.symbol] = (
                     self._symbol_daily_losses.get(position.symbol, 0) + 1
                 )
+                # Flag stop-loss exits for next-day cooloff (engine reads this).
+                if "stop_loss" in reason or "breakeven_stop" in reason:
+                    self.recent_stop_losses.add(position.symbol)
                 log.debug(
                     "Loss streak for %s: %d consecutive.",
                     position.symbol, self._symbol_daily_losses[position.symbol],
@@ -349,6 +449,7 @@ class Trader:
             self._entry_time.pop(position.symbol, None)
             self._partial_exits.pop(position.symbol, None)
             self._entry_qty.pop(position.symbol, None)
+            self._regime_params.pop(position.symbol, None)
 
             notify_order_exit(
                 symbol=position.symbol,

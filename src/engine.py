@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,9 +26,10 @@ from .signals.aggregator import SignalAggregator
 from .signals.base import Signal
 from .signals.fundamental import FundamentalSignal
 from .signals.macro import MacroSignal
+from .signals.finrl_signal import FinRLSignal
 from .signals.ml_model import MLSignal
 from .signals.orb import ORBSignal
-from .signals.regime import RegimeDetector, REGIME_ADJUSTMENTS
+from .signals.regime import RegimeDetector, REGIME_ADJUSTMENTS, MarketRegimeDetector, MarketRegime
 from .signals.sentiment import SentimentSignal
 from .signals.technical import TechnicalSignal
 from .signals.vwap_bounce import VWAPBounceSignal
@@ -53,6 +54,7 @@ class TradingEngine:
             provider=d.get("provider", "yfinance"),
             interval=d.get("bar_interval", "5m"),
             lookback_days=d.get("lookback_days", 30),
+            feed=d.get("feed", "iex"),
         )
         # ----- broker -----
         bcfg = config.get("broker", {})
@@ -65,17 +67,29 @@ class TradingEngine:
         self.sent = SentimentSignal(scfg.get("sentiment", {}))
         self.fund = FundamentalSignal(scfg.get("fundamental", {}))
         self.ml = MLSignal(scfg.get("ml", {}))
+        self.finrl = FinRLSignal(scfg.get("finrl", {}))
         self.orb = ORBSignal(scfg.get("orb", {}))
         self.vwap_bounce = VWAPBounceSignal(scfg.get("vwap_bounce", {}))
         self.macro = MacroSignal()
         self.regime = RegimeDetector()
+
+        # Per-symbol ADX-based regime detectors for adaptive exit routing.
+        # One instance per symbol — each keeps its own state / transition log.
+        self._sym_regime_detectors: Dict[str, MarketRegimeDetector] = {}
         self.agg = SignalAggregator(
             weights=scfg.get("weights", {}),
             enter_long=scfg.get("enter_long_threshold", 0.35),
             enter_short=scfg.get("enter_short_threshold", -0.35),
             exit_thresh=scfg.get("exit_threshold", 0.10),
             min_confidence=scfg.get("min_confidence", 0.25),
+            dead_signal_cycles=int(scfg.get("dead_signal_cycles", 3)),
+            require_ml_finrl_agreement=scfg.get("require_ml_finrl_agreement", False),
         )
+
+        # Regimes in which short entries are permitted.  In a bull regime, short
+        # signals fire randomly and lose reliably — gate them out entirely.
+        rcfg = config.get("risk", {})
+        self._short_regimes: list = rcfg.get("short_regimes", ["trending_bear", "high_volatility"])
 
         # ----- risk + trader -----
         self.risk = RiskManager(config.get("risk", {}))
@@ -117,8 +131,47 @@ class TradingEngine:
         self._rs_lookback: int   = int(_scfg.get("rs_lookback_bars", 6))
 
         self._last_day_started = None
+        self._last_universe_refresh: Optional[datetime] = None
+        self._universe_refresh_minutes: int = int(sched.get("universe_refresh_minutes", 60))
         self._cycle_count = 0
         self._started_at = datetime.now()
+
+        # Train local ML model on startup if no saved model exists yet.
+        # This runs once at launch (takes ~2s) so the model is ready by
+        # the first trading cycle — even if the engine starts before market open.
+        if self.ml._needs_retrain():
+            log.info("ML startup training — fetching historical bars …")
+            try:
+                train_bars = {sym: self.market.get_bars(sym) for sym in self.tickers}
+                ok = self.ml.train(train_bars)
+                if ok:
+                    log.info("ML startup training complete.")
+                else:
+                    log.warning("ML startup training produced no model — will retry at day start.")
+            except Exception as _e:
+                log.warning("ML startup training failed: %s", _e)
+
+        # Train FinRL PPO agent on startup if no saved model exists yet.
+        # Takes ~1-3 min on CPU or ~30s on GPU — runs once at launch.
+        if self.finrl._needs_retrain():
+            log.info("FinRL startup training — fetching historical bars …")
+            try:
+                # Reuse bars already fetched above (or fetch fresh if ml didn't run)
+                if not self.ml._needs_retrain():
+                    train_bars = {sym: self.market.get_bars(sym) for sym in self.tickers}
+                ok_rl = self.finrl.train(train_bars)
+                if ok_rl:
+                    log.info("FinRL startup training complete.")
+                else:
+                    log.warning("FinRL startup training failed — signal will return score=0.")
+            except Exception as _e:
+                log.warning("FinRL startup training failed: %s", _e)
+
+        # ── Next-day cooloff after stop-loss ──────────────────────────────────
+        # _cooloff_until[sym] = date (exclusive) through which sym is banned.
+        rcfg = config.get("risk", {})
+        self._use_next_day_cooloff: bool = bool(rcfg.get("next_day_cooloff", True))
+        self._cooloff_until: Dict[str, object] = {}   # sym → date
 
     # ---------- main loop ----------
     def run_forever(self) -> None:
@@ -168,6 +221,42 @@ class TradingEngine:
             self.risk.begin_day(self.broker.get_equity())
             self.trader.begin_day()
 
+            # Train / retrain the local ML model at day-start using the most
+            # recent historical bars.  This is a one-time ~2s cost per day;
+            # inference during the day is free and sub-millisecond.
+            _day_train_bars: dict = {}
+            if self.ml._needs_retrain() or self.finrl._needs_retrain():
+                log.info("Fetching bars for day-start ML/FinRL training …")
+                try:
+                    _day_train_bars = {sym: self.market.get_bars(sym) for sym in self.tickers}
+                except Exception as _fe:
+                    log.warning("Bar fetch for training failed: %s", _fe)
+
+            if self.ml._needs_retrain() and _day_train_bars:
+                try:
+                    ok = self.ml.train(_day_train_bars)
+                    if not ok:
+                        log.warning("ML training failed — signal will return score=0 today.")
+                except Exception as _train_err:
+                    log.warning("ML training error: %s", _train_err)
+
+            if self.finrl._needs_retrain() and _day_train_bars:
+                try:
+                    ok_rl = self.finrl.train(_day_train_bars)
+                    if not ok_rl:
+                        log.warning("FinRL training failed — signal will return score=0 today.")
+                except Exception as _rl_err:
+                    log.warning("FinRL training error: %s", _rl_err)
+
+            # Expire cooloffs that have passed (ban_date is exclusive upper bound).
+            if self._use_next_day_cooloff:
+                expired = [s for s, d in self._cooloff_until.items() if d <= today]
+                for s in expired:
+                    del self._cooloff_until[s]
+                    log.info("Cooloff expired for %s — eligible for entries today.", s)
+                if self._cooloff_until:
+                    log.info("Symbols still in cooloff: %s", list(self._cooloff_until.keys()))
+
             dynamic_tickers = self.universe.select_tickers()
             # Ensure we keep monitoring any open positions so we can exit them
             open_positions = self.broker.get_positions()
@@ -179,11 +268,19 @@ class TradingEngine:
 
             log.info("Target Universe updated for today: %s", self.tickers)
             self._last_day_started = today
+            self._last_universe_refresh = now_ny   # day-start counts as first refresh
 
-        # End-of-day flatten
+        # ── Hourly intraday universe refresh ──────────────────────────────────
+        # Re-scores all sector ETFs on the last 60 min of 5-min bars and rotates
+        # the stock pool to whichever sectors are moving right now.
+        elif self._should_refresh_universe(now_ny):
+            self._intraday_universe_refresh(now_ny)
+
+        # End-of-day flatten — TRENDING positions are skipped (they run overnight);
+        # CHOPPY and NEUTRAL positions are always closed before market close.
         if self._near_close(now_ny):
-            log.info("Approaching market close - flattening all positions.")
-            self.trader.flatten_all("EOD flatten")
+            log.info("Approaching market close - flattening EOD-eligible positions.")
+            self.trader.flatten_eod_eligible("eod_flatten")
             return {}
 
         # ── Dead-zone gate: no new entries, positions still managed ──────────
@@ -242,7 +339,7 @@ class TradingEngine:
         }
         self.ml.prepare_cycle(ml_candidates)
 
-        # ── Pass 2: all remaining signals (ML, sentiment, fundamental, ORB, VWAP)
+        # ── Pass 2: all remaining signals (ML, FinRL, sentiment, fundamental, ORB, VWAP)
         for sym in self.tickers:
             bars = bars_by_sym[sym]
             t = tech_by_sym.get(sym)
@@ -252,6 +349,8 @@ class TradingEngine:
             if f: signals.append(f)
             m = self.ml.evaluate(sym, bars, tech_signal=t)
             if m: signals.append(m)
+            rl = self.finrl.evaluate(sym, bars, tech_signal=t)
+            if rl: signals.append(rl)
             o = self.orb.evaluate(sym, bars)
             if o: signals.append(o)
             v = self.vwap_bounce.evaluate(sym, bars)
@@ -264,6 +363,12 @@ class TradingEngine:
             market_multiplier=market_multiplier,
             weight_overrides=regime_adj.get("weight_overrides") or None,
         )
+
+        # Propagate the active-weight ratio to RiskManager so position sizes
+        # are scaled up to compensate for structurally-suppressed confidence
+        # when ML / sentiment / fundamental are offline.
+        self.risk.update_dead_signal_ratio(self.agg.threshold_ratio)
+
         for sym, d in decisions.items():
             log.info(
                 "DECISION %s | score=%+.3f conf=%.2f action=%s regime=%s comp=%s",
@@ -273,6 +378,21 @@ class TradingEngine:
 
         # 3. Manage open positions (uses latest decisions)
         self.trader.manage_open_positions(decisions)
+
+        # Register next-day cooloffs for any stop-losses that just fired.
+        if self._use_next_day_cooloff and self.trader.recent_stop_losses:
+            from datetime import date as _date
+            import bisect as _bisect
+            for sym in self.trader.recent_stop_losses:
+                # Ban the symbol for the rest of today + all of tomorrow.
+                # We store ban_until = today + 2 calendar days so the expiry
+                # check (d <= today) lifts the ban the day after tomorrow's open.
+                ban_until = today + timedelta(days=2)
+                self._cooloff_until[sym] = ban_until
+                log.info(
+                    "COOLOFF: %s stopped out — banned until %s (next trading day).",
+                    sym, ban_until,
+                )
 
         # 4. Consider new entries — subject to dead zone, regime, and RS filter.
         for sym, d in decisions.items():
@@ -302,11 +422,45 @@ class TradingEngine:
                     )
                     continue
 
+            # Gate D: regime-gated short selling.
+            #         Shorting in a bull market fires randomly and loses reliably.
+            #         Only allow SELL entries when the regime is one of the
+            #         configured short_regimes (trending_bear, high_volatility).
+            if d.action == "SELL":
+                if regime not in self._short_regimes:
+                    log.info(
+                        "SKIP %s short — regime '%s' not in allowed short regimes %s.",
+                        sym, regime, self._short_regimes,
+                    )
+                    continue
+                # For shorts: also apply relative-strength filter in reverse —
+                # only short stocks that are *underperforming* SPY.
+                rs = self._compute_rs(sym, bars_by_sym, spy_bars)
+                if rs > self._rs_min:
+                    log.info(
+                        "SKIP %s short — RS %.4f > %.4f (outperforming SPY, not a short candidate).",
+                        sym, rs, self._rs_min,
+                    )
+                    continue
+
+            # Gate C: next-day cooloff — skip symbols that stopped out yesterday.
+            if self._use_next_day_cooloff and sym in self._cooloff_until:
+                log.info(
+                    "SKIP %s — in cooloff until %s after prior stop-loss.",
+                    sym, self._cooloff_until[sym],
+                )
+                continue
+
             atr = None
             tech_sig = next((s for s in signals if s.symbol == sym and s.source.value == "technical"), None)
             if tech_sig:
                 atr = tech_sig.metadata.get("atr")
-            self.trader.handle_decision(d, atr=atr)
+
+            # ── Per-symbol adaptive regime params ─────────────────────────
+            sym_regime_params = self._detect_sym_regime_params(
+                sym, bars_by_sym.get(sym)
+            )
+            self.trader.handle_decision(d, atr=atr, regime_params=sym_regime_params)
 
         # 5. Write the live status page (never let this break the loop).
         self._cycle_count += 1
@@ -318,9 +472,46 @@ class TradingEngine:
             started_at=self._started_at,
             refresh_seconds=max(10, self.poll_seconds),
             kill_switch=self.risk.kill_switch_engaged(),
+            regime=regime,
         )
 
         return decisions
+
+    # ---------- adaptive regime helpers ----------
+    def _detect_sym_regime_params(self, sym: str, bars) -> dict:
+        """Return per-position exit params for *sym* based on its own ADX regime.
+
+        TRENDING  → no partial profit, hold overnight (eod_flatten=False)
+        CHOPPY /
+        NEUTRAL   → partial profit at +1 % / +2.5 %, close at EOD (eod_flatten=True)
+        """
+        if bars is None or bars.empty:
+            # No data — default to conservative (CHOPPY) behaviour.
+            return {"regime": "neutral", "pp1_pct": 0.010, "pp2_pct": 0.025, "eod_flatten": True}
+
+        if sym not in self._sym_regime_detectors:
+            self._sym_regime_detectors[sym] = MarketRegimeDetector()
+
+        try:
+            regime = self._sym_regime_detectors[sym].detect(bars)
+        except Exception as _e:
+            log.debug("Regime detection failed for %s: %s — defaulting NEUTRAL", sym, _e)
+            regime = MarketRegime.NEUTRAL
+
+        if regime == MarketRegime.TRENDING:
+            return {
+                "regime":      "trending",
+                "pp1_pct":     9999.0,   # partial profit disabled — let winner run
+                "pp2_pct":     9999.0,
+                "eod_flatten": False,    # position may run overnight
+            }
+        else:
+            return {
+                "regime":      regime.value,
+                "pp1_pct":     float(self.config.get("risk", {}).get("partial_profit_1_pct", 0.010)),
+                "pp2_pct":     float(self.config.get("risk", {}).get("partial_profit_2_pct", 0.025)),
+                "eod_flatten": True,     # close before market close as usual
+            }
 
     # ---------- windowing helpers ----------
     def _within_trading_window(self, now_ny: datetime) -> bool:
@@ -362,6 +553,42 @@ class TradingEngine:
             return round(sym_ret - spy_ret, 6)
         except (ZeroDivisionError, IndexError):
             return 0.0
+
+    def _should_refresh_universe(self, now_ny: datetime) -> bool:
+        """True when enough time has passed since the last universe refresh."""
+        if self._last_universe_refresh is None:
+            return False
+        elapsed_min = (now_ny - self._last_universe_refresh).total_seconds() / 60
+        return elapsed_min >= self._universe_refresh_minutes
+
+    def _intraday_universe_refresh(self, now_ny: datetime) -> None:
+        """Rotate the ticker pool based on current intraday sector momentum."""
+        log.info(
+            "Hourly universe refresh at %s ET — re-scoring sectors on 5-min bars …",
+            now_ny.strftime("%H:%M"),
+        )
+        new_tickers = self.universe.select_tickers_intraday()
+        if not new_tickers:
+            log.warning("Intraday refresh returned no tickers — keeping current pool.")
+            self._last_universe_refresh = now_ny
+            return
+
+        # Always keep tickers with open positions so we can manage/exit them
+        open_syms = list(self.broker.get_positions().keys())
+        combined = new_tickers + [t for t in open_syms if t not in new_tickers]
+
+        added   = sorted(set(combined) - set(self.tickers))
+        removed = sorted(set(self.tickers) - set(combined))
+        if added or removed:
+            log.info(
+                "Universe rotated | +added=%s  -removed=%s | new pool: %s",
+                added, removed, combined,
+            )
+        else:
+            log.info("Universe unchanged after hourly refresh.")
+
+        self.tickers = combined
+        self._last_universe_refresh = now_ny
 
     @staticmethod
     def _parse_time(t_str: str) -> dtime:

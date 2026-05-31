@@ -145,6 +145,7 @@ class VWAPBounceSignal:
 
         direction = 1.0 if bouncing_bullish else -1.0
         # Base magnitude from how clean the setup is.
+        # strength: 0.5 (bare bounce), 0.75 (one confirming factor), 1.0 (both)
         strength = 0.5
         if vol_declining:
             strength += 0.25
@@ -152,8 +153,18 @@ class VWAPBounceSignal:
             strength += 0.25
 
         score = float(np.clip(direction * strength, -1.0, 1.0))
-        confidence = float(np.clip(0.35 + strength * 0.4, 0.0, 1.0))
-        return score, confidence, "vwap_bounce"
+
+        # Confidence scales with the number of confirming factors.
+        # A bare bounce (no vol exhaustion, no surge) gets only 0.40 confidence —
+        # not enough alone to cross min_confidence=0.50 without tech agreeing.
+        # A fully confirmed bounce (both factors) gets 0.75.
+        if vol_declining and vol_surging:
+            confidence = 0.75  # textbook setup
+        elif vol_declining or vol_surging:
+            confidence = 0.55  # one confirmation
+        else:
+            confidence = 0.40  # bare price bounce — probably noise
+        return score, float(confidence), "vwap_bounce"
 
     def _cross_score(
         self,

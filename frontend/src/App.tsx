@@ -16,6 +16,7 @@ interface Decision {
   score: number;
   confidence: number;
   action: string;
+  components?: Record<string, number>;
 }
 
 interface StatusData {
@@ -193,7 +194,7 @@ function App() {
         </div>
 
         <div className="panel glass">
-          <h2>Live Signal Scores</h2>
+          <h2>Live Signal Scores <span style={{fontSize:'12px',color:'#8b8f98',fontWeight:'normal'}}>(need ≥ 0.50 to enter)</span></h2>
           {data?.decisions?.length === 0 ? (
             <p className="muted">No signals evaluated.</p>
           ) : (
@@ -202,21 +203,36 @@ function App() {
                 <tr>
                   <th>Symbol</th>
                   <th>Score</th>
-                  <th>Confidence</th>
+                  <th>Conf</th>
+                  <th>Tech</th>
+                  <th>Sent</th>
+                  <th>ORB</th>
+                  <th>VWAP</th>
+                  <th>ML</th>
                   <th>Action</th>
                 </tr>
               </thead>
               <tbody>
-                {data?.decisions?.sort((a,b) => b.score - a.score).map(d => (
-                  <tr key={d.symbol}>
-                    <td><strong>{d.symbol}</strong></td>
-                    <td>{d.score > 0 ? '+' : ''}{d.score.toFixed(3)}</td>
-                    <td>{d.confidence.toFixed(2)}</td>
-                    <td>
-                      <span className={`badge ${d.action.toLowerCase()}`}>{d.action}</span>
-                    </td>
-                  </tr>
-                ))}
+                {data?.decisions?.sort((a,b) => b.score - a.score).map(d => {
+                  const c = d.components || {};
+                  const scoreClass = d.score >= 0.50 ? 'pos' : d.score <= -0.50 ? 'neg' : '';
+                  const fmt = (v?: number) => v !== undefined ? (v > 0 ? '+' : '') + v.toFixed(3) : '—';
+                  return (
+                    <tr key={d.symbol} style={d.score >= 0.40 ? {background: 'rgba(63,185,80,0.06)'} : {}}>
+                      <td><strong>{d.symbol}</strong></td>
+                      <td className={scoreClass}><strong>{d.score > 0 ? '+' : ''}{d.score.toFixed(3)}</strong></td>
+                      <td>{d.confidence.toFixed(2)}</td>
+                      <td className={c.technical > 0 ? 'pos' : c.technical < 0 ? 'neg' : ''}>{fmt(c.technical)}</td>
+                      <td className={c.sentiment > 0 ? 'pos' : c.sentiment < 0 ? 'neg' : ''}>{fmt(c.sentiment)}</td>
+                      <td className={c.orb > 0 ? 'pos' : c.orb < 0 ? 'neg' : ''}>{fmt(c.orb)}</td>
+                      <td className={c.vwap_bounce > 0 ? 'pos' : c.vwap_bounce < 0 ? 'neg' : ''}>{fmt(c.vwap_bounce)}</td>
+                      <td className={c.ml > 0 ? 'pos' : c.ml < 0 ? 'neg' : ''}>{fmt(c.ml)}</td>
+                      <td>
+                        <span className={`badge ${d.action.toLowerCase()}`}>{d.action}</span>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}

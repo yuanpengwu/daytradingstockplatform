@@ -75,6 +75,26 @@ class DynamicUniverse:
 
     # ── public ────────────────────────────────────────────────────────────────
 
+    def select_tickers_intraday(self) -> List[str]:
+        """Hourly intraday sector rotation using 5-min bars (no Gemini call).
+
+        Scores each sector ETF on the last 60 minutes of intraday action:
+          • 1-hour return relative to SPY  (50 % weight)
+          • Raw 1-hour return              (30 % weight)
+          • Volume surge vs prior hour     (20 % weight)
+
+        Then re-ranks stocks within the top sectors by intraday momentum
+        and volume.  Returns an empty list on failure so the engine keeps
+        the current pool unchanged.
+        """
+        if not self.enabled:
+            return []
+        try:
+            return self._select_intraday_momentum()
+        except Exception as exc:
+            log.warning("Intraday universe refresh failed (%s) — keeping current pool.", exc)
+            return []
+
     def select_tickers(self) -> List[str]:
         if not self.enabled:
             return self.fallback
@@ -336,6 +356,150 @@ class DynamicUniverse:
             [(s, f"{scores[s]:.2f}") for s in ranked[:5]],
         )
         return ranked
+
+    # ── Intraday 5-min bar fetch ──────────────────────────────────────────────
+
+    def _fetch_intraday_bars(
+        self,
+        symbols: List[str],
+        lookback_hours: int = 4,
+    ) -> Dict[str, "pd.DataFrame"]:
+        """Fetch the last `lookback_hours` of 5-min bars for each symbol."""
+        from datetime import timezone
+        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        from alpaca.data.enums import DataFeed
+
+        key    = os.getenv("ALPACA_API_KEY")
+        secret = os.getenv("ALPACA_API_SECRET")
+        if not key or not secret:
+            raise RuntimeError("Alpaca API keys missing")
+
+        client   = StockHistoricalDataClient(key, secret)
+        end_dt   = datetime.now(tz=timezone.utc)
+        start_dt = end_dt - timedelta(hours=lookback_hours)
+
+        req = StockBarsRequest(
+            symbol_or_symbols=symbols,
+            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            start=start_dt,
+            end=end_dt,
+            feed=DataFeed.IEX,
+        )
+        raw = client.get_stock_bars(req).df
+        result: Dict[str, pd.DataFrame] = {}
+        if raw.empty:
+            return result
+        for sym in symbols:
+            try:
+                if isinstance(raw.index, pd.MultiIndex):
+                    if sym not in raw.index.get_level_values(0):
+                        continue
+                    result[sym] = raw.loc[sym].copy()
+                else:
+                    result[sym] = raw.copy()
+            except Exception:
+                pass
+        return result
+
+    # ── Intraday momentum selection ───────────────────────────────────────────
+
+    def _select_intraday_momentum(self) -> List[str]:
+        """Score sectors on last 60 min of 5-min bars; re-rank stocks intraday."""
+        etf_symbols = list(SECTORS.keys()) + ["SPY"]
+        log.info(
+            "Intraday sector refresh: fetching 4h 5-min bars for %d sector ETFs …",
+            len(SECTORS),
+        )
+        bars = self._fetch_intraday_bars(etf_symbols, lookback_hours=4)
+        if not bars:
+            raise RuntimeError("No intraday ETF bars returned.")
+
+        # SPY 1-hour benchmark return
+        spy_df = bars.get("SPY")
+        spy_1h = 0.0
+        if spy_df is not None and len(spy_df) >= 12:
+            spy_1h = float(spy_df["close"].iloc[-1] / spy_df["close"].iloc[-12] - 1)
+
+        # Score each sector ETF
+        etf_scores: Dict[str, float] = {}
+        for etf in SECTORS:
+            df = bars.get(etf)
+            if df is None or len(df) < 12:
+                continue
+            close  = df["close"]
+            volume = df["volume"]
+
+            ret_1h = float(close.iloc[-1] / close.iloc[-12] - 1)
+            rs     = ret_1h - spy_1h
+
+            # Volume surge: last 12 bars vs prior 12 bars
+            vol_now   = float(volume.tail(12).mean())
+            vol_prior = float(volume.iloc[-24:-12].mean()) if len(volume) >= 24 else vol_now
+            vol_surge = (vol_now / vol_prior - 1) if vol_prior > 0 else 0.0
+            vol_surge = max(-0.5, min(0.5, vol_surge))
+
+            etf_scores[etf] = 0.50 * rs + 0.30 * ret_1h + 0.20 * vol_surge
+
+        if not etf_scores:
+            raise RuntimeError("No sectors could be scored from intraday bars.")
+
+        ranked_etfs = sorted(etf_scores, key=etf_scores.get, reverse=True)  # type: ignore[arg-type]
+        top_sectors = ranked_etfs[: self.max_sectors]
+        log.info(
+            "Intraday sector rotation → top %d: %s",
+            self.max_sectors,
+            [(s, SECTORS[s], f"{etf_scores[s]:+.4f}") for s in top_sectors],
+        )
+
+        # Fetch intraday bars for stock candidates
+        stock_pool: List[str] = []
+        for etf in top_sectors:
+            stock_pool.extend(SECTOR_STOCKS.get(etf, []))
+        seen: set = set()
+        stock_pool = [s for s in stock_pool if not (s in seen or seen.add(s))]  # type: ignore[func-returns-value]
+
+        try:
+            stock_bars = self._fetch_intraday_bars(stock_pool, lookback_hours=4)
+        except Exception as exc:
+            log.warning("Stock intraday bar fetch failed (%s); using sector order.", exc)
+            stock_bars = {}
+
+        # Rank stocks within each sector by 1-hour return + volume surge
+        stocks_per_sector = max(1, self.max_tickers // len(top_sectors))
+        chosen: List[str] = []
+        for etf in top_sectors:
+            candidates = SECTOR_STOCKS.get(etf, [])
+            sym_scores: Dict[str, float] = {}
+            for sym in candidates:
+                df = stock_bars.get(sym)
+                if df is None or len(df) < 6:
+                    sym_scores[sym] = 0.0
+                    continue
+                close  = df["close"]
+                volume = df["volume"]
+                n      = min(12, len(close))
+                ret    = float(close.iloc[-1] / close.iloc[-n] - 1)
+                vol_m  = float(volume.mean()) or 1.0
+                vsurge = float(volume.iloc[-1]) / vol_m - 1
+                sym_scores[sym] = 0.60 * ret + 0.40 * min(vsurge, 2.0) / 2.0
+
+            ranked_stocks = sorted(sym_scores, key=sym_scores.get, reverse=True)  # type: ignore[arg-type]
+            log.info(
+                "Intraday stock ranking [%s]: %s",
+                SECTORS.get(etf, etf),
+                [(s, f"{sym_scores[s]:+.3f}") for s in ranked_stocks[:5]],
+            )
+            chosen.extend(ranked_stocks[:stocks_per_sector])
+
+        # Always keep SPY and QQQ
+        for t in ["SPY", "QQQ"]:
+            if t not in chosen:
+                chosen.append(t)
+
+        log.info("Intraday universe (%d tickers): %s", len(chosen), chosen)
+        return chosen
 
     # ── Main selection flow ───────────────────────────────────────────────────
 

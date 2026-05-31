@@ -1,174 +1,149 @@
-# ============================================================
-#  DayTradingBot configuration
-# ============================================================
-
 broker:
-  name: alpaca                   # paper | alpaca | robinhood
-  starting_cash: 10000           # only used by paper broker
-  slippage_bps: 5                # simulated slippage for paper broker
-
+  name: alpaca
+  starting_cash: 10000
+  slippage_bps: 5
 universe:
   dynamic: true
   max_tickers: 10
-  max_sectors: 2             # pick top N sectors (stocks split evenly across them)
-  method: "sector_intelligence"
-  gemini_sector_call: true   # ask Gemini once/day which sectors will be most active
-  stock_rank_by: "volume_atr"  # rank stocks within sector by volume surge + ATR
-  # Fallback if dynamic selection fails
+  max_sectors: 2
+  method: sector_intelligence
+  gemini_sector_call: true
+  stock_rank_by: volume_atr
   fallback_tickers:
-    - AAPL
-    - MSFT
-    - NVDA
-    - TSLA
-    - AMD
-    - META
-    - GOOGL
-    - AMZN
-    - SPY
-    - QQQ
-
+  - AAPL
+  - MSFT
+  - NVDA
+  - TSLA
+  - AMD
+  - META
+  - GOOGL
+  - AMZN
+  - SPY
+  - QQQ
 data:
-  provider: alpaca             # yfinance | polygon
-  bar_interval: 5m               # 1m, 5m, 15m, 1h, 1d
-  lookback_days: 30              # history to keep in memory for indicators
-
+  provider: alpaca
+  feed: iex          # iex = free/paper  |  sip = live account (Algo Trader Plus)
+  bar_interval: 1m
+  lookback_days: 10
 signals:
-  # Weighted ensemble. Final score in [-1, +1].
-  # Positive => buy bias, negative => sell/short bias.
-  #
-  # Tuning notes:
-  #   - technical boosted to 0.30: most reliable, no external API needed
-  #   - vwap_bounce reduced to 0.10: VWAP position is already a sub-indicator
-  #     inside technical (double-counting), so this avoids over-weighting it
-  #   - ml reduced to 0.15: LLM is an opinion on 10 bars, not a trained model
-  #   - orb stays at 0.20: high-quality morning catalyst, fades naturally via
-  #     its own time-decay (confidence→0 after 4 h)
   weights:
-    technical:   0.30
-    sentiment:   0.10
+    technical: 0.30
+    sentiment: 0.10
     fundamental: 0.10
-    ml:          0.15
-    orb:         0.20
-    vwap_bounce: 0.15
-
-  # Action thresholds on the aggregated score.
-  entry_persistence_bars: 2      # require 2 consecutive bars above threshold — filters one-bar whipsaws
-
-  # ── Relative strength filter ───────────────────────────────────────────────
-  # Only enter LONG if the symbol's N-bar return beats SPY's N-bar return by
-  # at least relative_strength_min (0.0 = must simply outperform; raise to
-  # e.g. 0.001 = must beat SPY by +0.1% to reduce marginal entries).
-  relative_strength_min: 0.0     # min RS vs SPY for long entries
-  rs_lookback_bars: 6            # bars to compute RS over (~30 min on 5m)
-
-  enter_long_threshold:   0.50   # backtest-optimised: 57% WR on 15-day test (vs 21% at 0.35)
-  enter_short_threshold: -0.50   # ignored if shorting disabled
-  exit_threshold:         0.25   # raised: don't cut recovering positions prematurely
-  min_confidence:         0.55   # raised: require high confidence before acting
-
+    ml: 0.05
+    finrl: 0.10
+    orb: 0.10
+    vwap_bounce: 0.25
+  entry_persistence_bars: 2
+  relative_strength_min: -0.001
+  rs_lookback_bars: 6
+  enter_long_threshold: 0.45
+  enter_short_threshold: -0.45
+  exit_threshold: 0.15
+  min_confidence: 0.50
+  require_ml_finrl_agreement: false  # disabled — over-filters winners without quality gain
   technical:
-    # RSI and MACD tuned for 5-minute bars (intraday timeframe).
-    # RSI-14 on 5m = 70-minute lookback → too slow; RSI-9 = 45 min → day-trade sweet spot.
-    # MACD 12/26/9 on 5m = 60/130/45 min lookback → multi-hour trend, not intraday.
-    # MACD  8/21/5 on 5m = 40/105/25 min → much better intraday momentum read.
-    rsi_period: 9
+    rsi_period: 45
     rsi_oversold: 35
     rsi_overbought: 65
-    macd_fast: 8
-    macd_slow: 21
-    macd_signal: 5
-    bb_period: 20
+    macd_fast: 40
+    macd_slow: 105
+    macd_signal: 25
+    bb_period: 100
     bb_std: 2.0
-    ema_short: 9
-    ema_long: 21
+    ema_short: 45
+    ema_long: 105
     use_vwap: true
-    atr_period: 14
-
+    atr_period: 70
   sentiment:
-    sources: [newsapi, finnhub]
-    max_age_minutes: 120         # ignore stale headlines
-    model: vader                 # vader | finbert (requires transformers)
-
+    sources:
+    - newsapi
+    - finnhub
+    max_age_minutes: 120
+    model: vader
   fundamental:
-    sec_filing_types: ["8-K", "10-Q", "10-K", "4"]    # 4 = insider trades
-    earnings_window_days: 3      # suppress signal if 10-Q/10-K filed within this many days
-    lookback_hours: 48           # how far back to pull SEC filings
-
+    sec_filing_types:
+    - 8-K
+    - 10-Q
+    - 10-K
+    - '4'
+    earnings_window_days: 3
+    lookback_hours: 48
   ml:
-    model_path: models/xgb_intraday.joblib
-    retrain_on_startup: false
-    prediction_horizon_minutes: 45   # cache LLM result per symbol for 45 min (was 10)
+    mode: local                    # local (free) | llm | hybrid
+    model_path: models/local_lgbm.pkl
+    retrain_days: 7
+    prediction_horizon_minutes: 45
+    label_method: fixed            # fixed (direction) | triple_barrier (TP-before-SL)
+    tp_barrier_pct: 0.004          # take-profit barrier for triple-barrier labels
+    sl_barrier_pct: 0.003          # stop-loss barrier for triple-barrier labels
     min_confidence: 0.55
-    tech_threshold: 0.30             # only call LLM when tech score >= this (was 0.20)
-    max_daily_calls: 80              # hard cap on total Gemini calls per day
-    max_calls_per_cycle: 3           # per engine cycle, only query top-N tickers by tech score
-
+    tech_threshold: 0.10           # lowered: local model is free, no need to gate tightly
+    max_daily_calls: 5             # LLM calls/day cap (ignored in local mode)
+    max_calls_per_cycle: 1         # LLM calls/cycle cap (ignored in local mode)
   orb:
-    orb_minutes: 15                  # length of opening range window
-    volume_confirmation_mult: 1.3    # breakout bar must exceed avg vol by this multiple
-    decay_start_minutes: 120         # signal at full strength up to this many minutes after open
-    decay_end_minutes: 240           # signal fades to zero by this many minutes after open
-
+    orb_minutes: 15
+    volume_confirmation_mult: 1.3
+    decay_start_minutes: 120
+    decay_end_minutes: 240
   vwap_bounce:
-    proximity_pct: 0.003             # price must be within 0.3% of VWAP
-    vol_decline_thresh: 0.85         # approach bars volume must drop to this fraction of avg
-    vol_surge_thresh: 1.3            # bounce bar volume must be this multiple of avg
-    approach_bars: 3                 # number of bars to assess the approach pattern
-
+    proximity_pct: 0.003
+    vol_decline_thresh: 0.85
+    vol_surge_thresh: 1.3
+    approach_bars: 15
+  finrl:
+    model_path: models/finrl_ppo.zip
+    retrain_days: 1               # retrain every trading day (incremental — keeps prior knowledge)
+    min_confidence: 0.40          # lower than ML: RL needs more steps to reach high conviction
+    tech_threshold: 0.10          # lowered: run inference on all meaningful symbols
+    total_timesteps: 200000       # PPO steps for initial full train
+    daily_timesteps: 50000        # PPO steps for each daily incremental update (faster ~30s GPU)
+    device: auto                  # auto | cpu | cuda
 risk:
-  max_position_pct: 0.10         # never put >10% of equity in one ticker
-  max_total_exposure_pct: 0.80   # never deploy >80% of equity
-  max_concurrent_positions: 5
-  daily_loss_limit_pct: 0.03     # kill switch: stop trading for the day after -3%
-  per_trade_stop_loss_pct: 0.02  # 2% hard stop
-  take_profit_pct: 0.04          # 4% take profit (2R)
-  trailing_stop_pct: 0.015       # 1.5% trailing stop — tighter now that signal-reversal no longer exits profitable positions early
-  breakeven_trigger_pct: 0.004   # once position gains 0.4%, move effective stop floor to entry (can't become a full loser)
-  use_atr_stops: true            # if true, use ATR-based stops (floored by % stops)
-  atr_stop_multiplier: 2.5      # ATR × this = stop distance (was 2.0 — widened to reduce noise stop-outs)
-  atr_tp_multiplier: 3.0        # ATR × this = TP distance (floored by take_profit_pct = 4%)
+  max_position_pct: 0.1
+  max_total_exposure_pct: 0.8
+  max_concurrent_positions: 11
+  daily_loss_limit_pct: 0.03
+  per_trade_stop_loss_pct: 0.025
+  take_profit_pct: 0.06
+  trailing_stop_pct: 0.030000000000000002
+  breakeven_trigger_pct: 0.022
+  use_atr_stops: true
+  atr_stop_multiplier: 13.0
+  atr_tp_multiplier: 4.0
   shorting_enabled: false
-  pdt_protection: true           # block trades that would trigger PDT rule
-  kelly_fraction: 0.25           # fractional-Kelly sizing (0.25 = quarter-Kelly)
-  min_hold_minutes: 25           # signal-reversal exit blocked until position held this long (stop/TP still fire immediately)
-
-  # ── Partial profit taking ──────────────────────────────────────
-  partial_profit_1_pct: 0.010    # sell 33% of position at +1% gain
-  partial_profit_2_pct: 0.025    # sell another 33% at +2.5%; remainder rides with trailing stop
-
-  # ── Stale position exit ────────────────────────────────────────
-  stale_exit_minutes: 20         # exit if position hasn't moved ±0.3% after this many minutes
-  stale_exit_threshold_pct: 0.003  # minimum price movement (either direction) to keep holding
-
-  # ── Per-symbol daily loss streak filter ───────────────────────
-  max_symbol_daily_losses: 2     # skip entering a symbol after this many consecutive stop-losses today
-
-  # ── Sector concentration limit ────────────────────────────────
-  max_positions_per_sector: 1    # never hold >1 open position in the same sector (prevents correlated blow-ups)
-
-  # ── Daily trend filter ─────────────────────────────────────────
-  use_daily_trend_filter: true   # only enter long if current price > today's session open price
-
+  short_regimes:
+  - trending_bear
+  - high_volatility
+  pdt_protection: true
+  kelly_fraction: 0.25
+  min_hold_minutes: 45
+  max_hold_minutes: 480          # full trading session (was 180 — was clipping intraday winners)
+  partial_profit_1_pct: 0.01
+  partial_profit_2_pct: 0.025
+  stale_exit_minutes: 15
+  stale_exit_threshold_pct: 0.003
+  time_decay_tp_enabled: true
+  time_decay_tp_start_minutes: 45
+  time_decay_tp_full_minutes: 120
+  time_decay_tp_min_pct: 0.015
+  max_symbol_daily_losses: 2
+  dynamic_exclusion_win_rate: 0.25    # daily win rate threshold for bad-day detection
+  dynamic_exclusion_streak_days: 5    # consecutive bad days before symbol is excluded
+  max_positions_per_sector: 3
+  use_daily_trend_filter: true
 schedule:
-  poll_seconds: 60               # how often the main loop runs during market hours
-  market_open_buffer_minutes: 30 # don't trade in the opening 30 min — high noise, wide spreads, gap fills
-  market_close_buffer_minutes: 10 # flatten all positions N minutes before close
+  poll_seconds: 60
+  market_open_buffer_minutes: 30
+  market_close_buffer_minutes: 10
   trade_only_market_hours: true
-
-  # ── Pre-close entry cutoff ────────────────────────────────────
-  # Block new entries this many minutes before the close buffer kicks in.
-  # Eliminates "zero P&L" trades entered too late to move.
-  # (Close buffer at 3:50 PM − 30 min = no entries after 3:20 PM ET.)
-  no_entry_before_close_minutes: 30
-
-  # ── Midday dead zone ───────────────────────────────────────────
-  # No new entries between 11:30 AM and 2:00 PM ET.  Volume dries up,
-  # spreads widen, and signals generate false breakouts in this window.
-  # Open positions are still actively managed (stops/TPs fire normally).
-  no_trade_window_start: "11:30" # ET — dead zone start
-  no_trade_window_end:   "14:00" # ET — dead zone end (2 PM = "Power Hour" begins)
-
+  no_entry_before_close_minutes: 5    # EOD flush at close, not 30 min early
+  no_trade_window_start: '11:30'
+  no_trade_window_end: '14:00'
 notifications:
   on_trade: true
   on_kill_switch: true
-  channels: [console, discord, email]    # console | telegram | discord | email
+  channels:
+  - console
+  - discord
+  - email

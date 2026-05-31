@@ -27,6 +27,7 @@ def write_status_page(
     started_at: Optional[datetime] = None,
     refresh_seconds: int = 30,
     kill_switch: bool = False,
+    regime: str = "",
 ) -> None:
     """Render the current bot state to a standalone HTML file.
 
@@ -150,6 +151,7 @@ def write_status_page(
             "market_value": market_value,
             "unrealized_pnl": unrealized,
             "kill_switch": kill_switch,
+            "regime": regime,
             "positions": [
                 {
                     "symbol": sym,
@@ -166,7 +168,8 @@ def write_status_page(
                     "symbol": sym,
                     "score": d.score,
                     "confidence": d.confidence,
-                    "action": d.action
+                    "action": d.action,
+                    "components": {k: round(v, 4) for k, v in d.components.items()} if hasattr(d, "components") else {}
                 } for sym, d in (decisions or {}).items()
             ]
         }

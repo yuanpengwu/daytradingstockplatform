@@ -1,265 +1,112 @@
-"""CLI entry-point: backtest the configured strategy on historical bars.
-
-Data sources:
-    --data yfinance   (default) free Yahoo data; intraday limited to ~60 days
-    --data alpaca     Alpaca historical bars (uses your ALPACA_* keys in .env);
-                      more reliable, no rate-limiting
-
-Usage:
-    python run_backtest.py --data alpaca --interval 5m --start 2026-03-15 --end 2026-05-14
-    python run_backtest.py --data alpaca --interval 1d --start 2025-05-13 --end 2026-05-13
-
-Outputs:
-    - console summary + last 20 trades
-    - backtest_equity.html  (self-contained equity-curve chart)
-    - backtest_equity.csv   (raw equity curve)
-"""
+"""1-week backtest runner — walk-forward split to avoid ML look-ahead bias."""
 from __future__ import annotations
-
-import argparse
-import csv
-from datetime import datetime, timedelta
+import os, sys
 from pathlib import Path
 
-import pandas as pd
+ROOT = Path(__file__).parent
+sys.path.insert(0, str(ROOT))
+
 import yaml
 from dotenv import load_dotenv
+load_dotenv(ROOT / ".env")
 
 from src.backtest.backtester import Backtester, BacktestResult
-from src.utils.logger import get_logger
+from src.data.market_data import MarketData
+from src.signals.ml_model import MLSignal
+from src.signals.finrl_signal import FinRLSignal
+import numpy as np
+from collections import Counter
 
-log = get_logger("backtest")
+with open(ROOT / "config.yaml") as f:
+    config = yaml.safe_load(f)
 
+TICKERS = [
+    "CRM","ADBE","MSFT","AVGO","AMD",
+    "VMC","NUE","AAPL","NVDA","TSLA","META","GOOGL","AMZN",
+    "SPY","QQQ",
+]
+STARTING_CASH = float(config["broker"].get("starting_cash", 10_000))
+SLIPPAGE_BPS  = float(config["broker"].get("slippage_bps", 5))
 
-# ----------------------------------------------------------------------
-#  Equity-curve chart writer
-# ----------------------------------------------------------------------
-def _write_equity_chart(result: BacktestResult, html_path: Path, csv_path: Path,
-                        title: str) -> None:
-    """Write a self-contained HTML line chart of total capital over the run."""
-    ec = result.equity_curve
-    if not ec:
-        log.warning("Empty equity curve — skipping chart.")
-        return
+LOOKBACK_DAYS = 40   # ~22 trading days ≈ 1 calendar month
 
-    with open(csv_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["bar_index", "equity"])
-        for i, v in enumerate(ec):
-            w.writerow([i, round(v, 2)])
+print(f"\n{'='*60}")
+print(f"  DayTradingBot 1-month backtest  ({LOOKBACK_DAYS} calendar days)")
+print(f"  Cash: ${STARTING_CASH:,.0f}   Slippage: {SLIPPAGE_BPS} bps")
+print(f"{'='*60}\n")
 
-    W, H = 960, 420
-    pad_l, pad_r, pad_t, pad_b = 70, 20, 40, 40
-    plot_w, plot_h = W - pad_l - pad_r, H - pad_t - pad_b
-    lo, hi = min(ec), max(ec)
-    if hi == lo:
-        hi = lo + 1.0
-    n = len(ec)
+print(f"Fetching 1-min bars ({LOOKBACK_DAYS} calendar days) ...")
+md = MarketData(
+    provider=config["data"].get("provider","alpaca"),
+    interval="1m",
+    lookback_days=LOOKBACK_DAYS,
+    feed=config["data"].get("feed","iex"),
+)
 
-    def x(i: int) -> float:
-        return pad_l + (i / max(1, n - 1)) * plot_w
+bars_by_sym = {}
+for sym in TICKERS:
+    df = md.get_bars(sym)
+    if df is not None and not df.empty:
+        bars_by_sym[sym] = df
+        print(f"  {sym:6s}  {len(df):5d} bars  "
+              f"{df.index[0].strftime('%m/%d')} to {df.index[-1].strftime('%m/%d')}")
 
-    def y(v: float) -> float:
-        return pad_t + (1 - (v - lo) / (hi - lo)) * plot_h
+print(f"\nWalk-forward split: train on first 50%, test on last 50%")
+train_bars, test_bars = {}, {}
+for sym, df in bars_by_sym.items():
+    n = len(df); s = n // 2
+    if s >= 100: train_bars[sym] = df.iloc[:s]
+    if n-s >= 50: test_bars[sym]  = df.iloc[s:]
 
-    pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(ec))
-    start_v, end_v = ec[0], ec[-1]
-    ret_pct = (end_v - start_v) / start_v * 100 if start_v else 0.0
-    line_color = "#16a34a" if end_v >= start_v else "#dc2626"
-    baseline_y = y(start_v)
+print(f"Training local ML model (LightGBM) on {len(train_bars)} symbols ...")
+ml = MLSignal(config["signals"]["ml"])
+ml.train(train_bars)
 
-    ticks = []
-    for k in range(5):
-        v = lo + (hi - lo) * k / 4
-        ticks.append((v, y(v)))
-    grid = "".join(
-        f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{W-pad_r}" y2="{gy:.1f}" '
-        f'stroke="#e5e7eb" stroke-width="1"/>'
-        f'<text x="{pad_l-8}" y="{gy+4:.1f}" text-anchor="end" '
-        f'font-size="11" fill="#6b7280">${v:,.0f}</text>'
-        for v, gy in ticks
-    )
+# FinRL: use reduced timesteps for backtest speed (~30s CPU / ~10s GPU)
+print(f"Training FinRL PPO agent on {len(train_bars)} symbols ...")
+finrl_cfg = dict(config["signals"].get("finrl", {}))
+finrl_cfg["total_timesteps"] = 100_000  # more steps for larger 1-month dataset
+finrl = FinRLSignal(finrl_cfg)
+finrl.train(train_bars)
 
-    svg = f'''<svg viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg">
-  <rect width="{W}" height="{H}" fill="white"/>
-  {grid}
-  <line x1="{pad_l}" y1="{baseline_y:.1f}" x2="{W-pad_r}" y2="{baseline_y:.1f}"
-        stroke="#9ca3af" stroke-width="1" stroke-dasharray="4 3"/>
-  <polyline points="{pts}" fill="none" stroke="{line_color}" stroke-width="2"/>
-  <text x="{pad_l}" y="24" font-size="15" font-weight="600" fill="#111827">{title}</text>
-  <text x="{W-pad_r}" y="24" text-anchor="end" font-size="13" fill="{line_color}">
-    ${start_v:,.0f} &#8594; ${end_v:,.0f} ({ret_pct:+.2f}%)
-  </text>
-</svg>'''
+print(f"Running backtest on {len(test_bars)} symbols ...\n")
+bt = Backtester(config=config, starting_cash=STARTING_CASH,
+                slippage_bps=SLIPPAGE_BPS, interval="1m")
+bt.ml    = ml
+bt.finrl = finrl
+result = bt.run(test_bars)
 
-    html = f'''<!doctype html>
-<html><head><meta charset="utf-8"><title>{title}</title>
-<style>body{{font-family:system-ui,Arial,sans-serif;margin:24px;color:#111827}}
-.stats{{margin:12px 0;font-size:14px}} .stats b{{color:#111827}}</style></head>
-<body>
-<h2>Backtest — Total Capital Over Time</h2>
-<div class="stats">{result.summary()}</div>
-{svg}
-<div class="stats">Equity curve has {len(ec)} points. Raw data: backtest_equity.csv</div>
-</body></html>'''
+wins   = [t for t in result.trades if t.pnl > 0]
+losses = [t for t in result.trades if t.pnl <= 0]
+pf     = (abs(sum(t.pnl for t in wins)) /
+          abs(sum(t.pnl for t in losses))) if losses and any(t.pnl<0 for t in losses) else 999
+avg_w  = np.mean([t.pnl_pct*100 for t in wins])   if wins   else 0
+avg_l  = np.mean([t.pnl_pct*100 for t in losses]) if losses else 0
 
-    html_path.write_text(html, encoding="utf-8")
-    log.info("Equity chart written to %s", html_path)
-    log.info("Equity curve CSV written to %s", csv_path)
-
-
-# ----------------------------------------------------------------------
-#  Data fetchers
-# ----------------------------------------------------------------------
-def _fetch_yfinance_bars(tickers, interval, start, end):
-    import yfinance as yf
-
-    bars = {}
-    for sym in tickers:
-        df = yf.download(sym, start=start, end=end, interval=interval,
-                         progress=False, auto_adjust=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        if df.empty:
-            log.warning("No bars for %s", sym)
-            continue
-        bars[sym] = df.rename(columns=str.title)[["Open", "High", "Low", "Close", "Volume"]]
-    return bars
-
-
-def _alpaca_timeframe(interval):
-    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-
-    unit = interval[-1]
-    amt = int(interval[:-1]) if interval[:-1].isdigit() else 1
-    if unit == "m":
-        return TimeFrame(amt, TimeFrameUnit.Minute)
-    if unit == "h":
-        return TimeFrame(amt, TimeFrameUnit.Hour)
-    if unit == "d":
-        return TimeFrame(amt, TimeFrameUnit.Day)
-    log.warning("Unknown interval %s — defaulting to 5-minute bars.", interval)
-    return TimeFrame(5, TimeFrameUnit.Minute)
-
-
-def _fetch_alpaca_bars(tickers, interval, start, end):
-    """Fetch historical bars from Alpaca's data API.
-
-    Uses the IEX feed (available on free / paper accounts). Requires
-    ALPACA_API_KEY / ALPACA_API_SECRET in .env.
-    """
-    import os
-
-    try:
-        from alpaca.data.historical import StockHistoricalDataClient
-        from alpaca.data.requests import StockBarsRequest
-        from alpaca.data.enums import DataFeed
-    except ImportError as e:
-        raise RuntimeError("alpaca-py is not installed. Run setup.bat.") from e
-
-    key = os.getenv("ALPACA_API_KEY")
-    secret = os.getenv("ALPACA_API_SECRET")
-    if not (key and secret):
-        raise RuntimeError("ALPACA_API_KEY / ALPACA_API_SECRET missing from .env")
-
-    # Default window: last 60 days if not given.
-    end_dt = datetime.fromisoformat(end) if end else datetime.utcnow()
-    start_dt = datetime.fromisoformat(start) if start else end_dt - timedelta(days=60)
-
-    client = StockHistoricalDataClient(key, secret)
-    tf = _alpaca_timeframe(interval)
-    req = StockBarsRequest(
-        symbol_or_symbols=list(tickers),
-        timeframe=tf,
-        start=start_dt,
-        end=end_dt,
-        feed=DataFeed.IEX,          # free-tier feed
-    )
-    log.info("Requesting Alpaca bars: %s %s %s -> %s", tickers, interval, start_dt, end_dt)
-    resp = client.get_stock_bars(req)
-    df = resp.df  # MultiIndex (symbol, timestamp)
-    if df is None or df.empty:
-        log.error("Alpaca returned no data for the requested window.")
-        return {}
-
-    bars = {}
-    symbols_in = df.index.get_level_values(0).unique()
-    for sym in tickers:
-        if sym not in symbols_in:
-            log.warning("No Alpaca bars for %s", sym)
-            continue
-        sub = df.loc[sym].copy()
-        sub = sub.rename(columns={
-            "open": "Open", "high": "High", "low": "Low",
-            "close": "Close", "volume": "Volume",
-        })
-        # Index is already a tz-aware DatetimeIndex of bar timestamps.
-        bars[sym] = sub[["Open", "High", "Low", "Close", "Volume"]]
-    return bars
-
-
-# ----------------------------------------------------------------------
-#  Main
-# ----------------------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--data", default="yfinance", choices=["yfinance", "alpaca"],
-                        help="Historical data source")
-    parser.add_argument("--start", default=None)
-    parser.add_argument("--end", default=None)
-    parser.add_argument("--interval", default=None)
-    parser.add_argument("--tickers", nargs="*", default=None)
-    parser.add_argument("--cash", type=float, default=10_000)
-    args = parser.parse_args()
-
-    load_dotenv()
-
-    cfg_path = Path(args.config)
-    if not cfg_path.exists():
-        cfg_path = Path("config.yaml.example")
-    with open(cfg_path) as f:
-        cfg = yaml.safe_load(f)
-
-    tickers = args.tickers or cfg["universe"].get("fallback_tickers", ["SPY", "QQQ"])
-    interval = args.interval or cfg["data"].get("bar_interval", "5m")
-    log.info("Backtesting %s on %s %s bars from %s to %s",
-             tickers, args.data, interval, args.start, args.end)
-
-    if args.data == "alpaca":
-        bars = _fetch_alpaca_bars(tickers, interval, args.start, args.end)
-    else:
-        bars = _fetch_yfinance_bars(tickers, interval, args.start, args.end)
-
-    if not bars:
-        log.error("No data — aborting. (yfinance: intraday limited to ~60 days; "
-                  "alpaca: check your date window and that the market had data.)")
-        return
-
-    bt = Backtester(cfg, starting_cash=args.cash, interval=interval)
-    result = bt.run(bars)
-
-    print("=" * 70)
-    print(f"Data source: {args.data}")
-    print(result.summary())
-    print("=" * 70)
-    for t in result.trades[-20:]:
-        print(
-            f"{t.symbol:6s}  {t.entry_time}  -> {t.exit_time}  "
-            f"qty={t.qty}  pnl=${t.pnl:+.2f} ({t.pnl_pct*100:+.2f}%)  {t.reason}"
-        )
-
-    title = f"{'+'.join(bars.keys())}  |  {args.data} {interval}  |  {args.start or 'start'} -> {args.end or 'end'}"
-    _write_equity_chart(
-        result,
-        html_path=Path("backtest_equity.html"),
-        csv_path=Path("backtest_equity.csv"),
-        title=title,
-    )
-    print("=" * 70)
-    print("Equity-curve chart saved to: backtest_equity.html  (open it in your browser)")
-    print("Raw equity data saved to:   backtest_equity.csv")
-
-
-if __name__ == "__main__":
-    main()
+print(f"{'='*60}")
+print(f"  RESULTS")
+print(f"{'='*60}")
+print(f"  Starting cash : ${result.starting_cash:>10,.2f}")
+print(f"  Ending cash   : ${result.ending_cash:>10,.2f}")
+print(f"  Net P&L       : ${result.ending_cash-result.starting_cash:>+10,.2f}  ({result.total_return*100:+.2f}%)")
+print(f"{'─'*60}")
+print(f"  Total trades  : {result.num_trades}")
+print(f"  Win rate      : {len(wins)}/{result.num_trades}  ({result.win_rate*100:.1f}%)")
+print(f"  Avg win       : {avg_w:+.2f}%")
+print(f"  Avg loss      : {avg_l:+.2f}%")
+print(f"  Profit factor : {pf:.2f}x")
+print(f"  Sharpe ratio  : {result.sharpe:.2f}")
+print(f"{'─'*60}")
+print(f"  Exit reasons  :")
+for r, n in Counter(t.reason for t in result.trades).most_common():
+    pct = n/result.num_trades*100 if result.num_trades else 0
+    print(f"    {r:<22s} {n:3d} ({pct:.0f}%)")
+print(f"{'─'*60}")
+print(f"  Per-symbol:")
+sym_data = {}
+for t in result.trades:
+    sym_data.setdefault(t.symbol,[]).append(t.pnl)
+for sym, pnls in sorted(sym_data.items(), key=lambda x:-sum(x[1])):
+    w = sum(1 for p in pnls if p>0)
+    print(f"    {sym:<6s} {len(pnls):2d} trades  {w}/{len(pnls)} wins  ${sum(pnls):+.2f}")
+print(f"{'='*60}\n")

@@ -1,7 +1,7 @@
 import json
 import yaml
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from ..utils.trade_history import TradeHistory
@@ -27,7 +27,8 @@ def get_winrate():
 
 
 @app.get("/api/status")
-def get_status():
+def get_status(response: Response):
+    response.headers["Cache-Control"] = "no-store"
     if not _STATUS_PATH.exists():
         return {"error": "No status yet. Ensure main.py is running."}
     with open(_STATUS_PATH) as f:
