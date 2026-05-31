@@ -4,14 +4,11 @@ broker:
   slippage_bps: 5
 universe:
   dynamic: true
-  max_tickers: 13              # 10 sector picks + 3 Serenity bottleneck slots
+  max_tickers: 10
   max_sectors: 2
   method: sector_intelligence
   gemini_sector_call: true
   stock_rank_by: volume_atr
-  # Serenity Supply Chain Bottleneck & Hardware Arbitrage layer
-  serenity_screen: true        # enable daily supply-chain bottleneck injection
-  serenity_stocks: 3           # how many Serenity "invisible champion" slots to reserve
   fallback_tickers:
   - AAPL
   - MSFT
