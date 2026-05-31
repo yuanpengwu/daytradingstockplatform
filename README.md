@@ -4,8 +4,10 @@ A fully-automated, multi-signal day-trading platform for **US Stocks & ETFs**.
 It combines **8 signal sources** — including two trained ML models — into a
 weighted decision engine that routes each trade through a **market-regime
 detector**, applying different exit strategies depending on whether the stock is
-trending or choppy. Executes through a pluggable broker layer (Alpaca or
-built-in paper simulator) with strict risk controls.
+trending or choppy. A daily **Serenity supply-chain bottleneck screen** injects
+niche "Invisible Champion" stocks alongside standard sector picks. Executes
+through a pluggable broker layer (Alpaca or built-in paper simulator) with
+strict risk controls.
 
 ---
 
@@ -43,6 +45,14 @@ built-in paper simulator) with strict risk controls.
               │  Configurable weights per source; dead-signal   │
               │  detection auto-reduces threshold when fewer    │
               │  sources are active                             │
+              └──────────────────────┬──────────────────────────┘
+                                     │
+              ┌──────────────────────▼──────────────────────────┐
+              │   Serenity Supply Chain Bottleneck Screen        │
+              │   (runs once daily at market open)               │
+              │   7 bottleneck themes · 37 "Invisible Champion"  │
+              │   stocks · Gemini theme selection + quant screen  │
+              │   → injects 3 niche picks into daily pool        │
               └──────────────────────┬──────────────────────────┘
                                      │
               ┌──────────────────────▼──────────────────────────┐
@@ -107,6 +117,54 @@ threshold for broad market conditions (trending_bull, choppy, high_volatility).
 
 ---
 
+## Serenity Supply Chain Bottleneck & Hardware Arbitrage
+
+A daily stock-selection layer that identifies **"Invisible Champions"** — micro-cap
+and small-cap companies with structural monopolies over physical components that
+trillion-dollar industries cannot function without.
+
+### How it works (runs once at each market open)
+
+1. **Sector confirmation** — the quantitative sector scorer identifies today's booming
+   sectors (e.g. XLK + XLB).
+2. **Gemini theme selection** — one Gemini API call asks which supply-chain bottleneck
+   themes are most relevant to today's booming sectors and macro catalysts. Cached per
+   day; falls back to quant-only if no API key is present.
+3. **Quantitative bottleneck signals** computed for all 37 Serenity stocks:
+   - **Volume surge** vs 20-day mean → forced-liquidation reversal opportunity
+   - **ATR spike ratio** → quant scanner mismatch (algorithm-dropped micro-cap)
+   - **Momentum divergence** vs sector → alpha vs passive flow
+4. **Blend** — Gemini picks validated by quant signal fill the first slots; pure-quant
+   picks fill the rest. Top 3 injected into the 13-ticker daily pool.
+
+### Seven bottleneck themes
+
+| Theme | Key stocks | Thesis |
+|-------|-----------|--------|
+| Co-Packaged Optics / Silicon Photonics | COHR, LITE, FN, VIAV, AAOI | Copper wiring hitting bandwidth wall; CPO is structural replacement |
+| Silicon Carbide Wafer & Power Substrate | WOLF, ON, AEIS, VICR, MPWR | AI + EV power density exceeds silicon limits; SiC is irreplaceable |
+| Semiconductor Wafer & Substrate Monopolies | ENTG, ONTO, UCTT, ICHR, KLIC, FORM, PLAB | Sub-$500 M niches >80 % market share; leading-edge fabs cannot substitute |
+| Specialty Process Gases & Precursors | APD, LIN, CBT, ENTG, AZTA | Ultra-pure NF₃/WF₆ — handful of suppliers control 100 % of EUV fab input |
+| Advanced Semiconductor Packaging / Chiplets | AMKR, KLIC, COHU, FN, ONTO | Moore's Law cost-scaling stalled; chiplet integration is next scaling vector |
+| AI Data Center Thermal & Power Delivery | VICR, AEIS, GTLS, NOVT, CAMT | H100/B200 racks at 50–100 kW; legacy air cooling at physical ceiling |
+| Rare Earth & Critical Mineral Supply Chain | MP, NEM, FCX, ALTM | EV motors + military guidance need NdFeB magnets; MP = only active US mine |
+
+### LLM API usage — zero during trading
+
+| Feature | Calls/day | API key |
+|---------|-----------|---------|
+| Sector prediction (Gemini) | 1 | `GEMINI_API_KEY` |
+| Serenity theme screen (Gemini) | 1 | `GEMINI_API_KEY` |
+| ML signal (`mode: local`) | **0** | — |
+| FinRL PPO (local GPU) | **0** | — |
+| **Total** | **2 calls/day** | ~$0.0003/day |
+
+The ML signal runs `mode: local` — pure LightGBM inference, zero API calls during
+market hours. Switch to `mode: hybrid` in `config.yaml` to re-enable LLM fallback
+for borderline signals (≤ 5 extra calls/day).
+
+---
+
 ## Quick start
 
 ```bash
@@ -162,7 +220,8 @@ All knobs live in `config.yaml`:
 
 | Section | Key options |
 |---------|------------|
-| `universe` | `tickers` list, dynamic sector rotation on/off |
+| `universe` | `dynamic`, `max_tickers`, `max_sectors`, `gemini_sector_call` |
+| `universe` (Serenity) | `serenity_screen: true/false`, `serenity_stocks` (slots reserved for bottleneck picks) |
 | `signals.weights` | Per-source weight (technical, sentiment, fundamental, ml, finrl, orb, vwap_bounce, macro) |
 | `signals.ml` | `mode: local/llm/hybrid`, `retrain_days`, `model_path` |
 | `signals.finrl` | `retrain_days: 1`, `total_timesteps`, `daily_timesteps`, `min_confidence` |
@@ -184,7 +243,8 @@ src/
 │   ├── market_data.py       OHLCV bars (yfinance / Alpaca)
 │   ├── news_feed.py         NewsAPI / Finnhub headlines
 │   ├── sec_filings.py       EDGAR RSS 8-K / 4 parser
-│   ├── universe.py          Dynamic ticker selection
+│   ├── universe.py          Dynamic ticker selection: sector intelligence +
+│   │                        Serenity supply-chain bottleneck screen
 │   └── sectors.py           Sector / ETF mapping
 ├── signals/
 │   ├── technical.py         RSI, MACD, BB, EMA, ATR, volume
