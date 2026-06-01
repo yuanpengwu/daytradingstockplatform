@@ -129,6 +129,9 @@ risk:
   time_decay_tp_min_pct: 0.015
   max_symbol_daily_losses: 2
   min_entry_adx: 18                   # block entries when symbol ADX < this (no trend = noise)
+  weak_trend_adx_max: 25             # ADX in [min_entry_adx, this] = weak-trend zone
+  weak_trend_entry_threshold: 0.55   # min score required to enter in weak-trend zone
+  weak_trend_max_daily_losses: 1     # loss cap per day for weak-trend symbols (vs 2 normally)
   dynamic_exclusion_win_rate: 0.30    # daily win rate threshold for bad-day detection
   dynamic_exclusion_streak_days: 3    # consecutive bad days before symbol is excluded
   max_positions_per_sector: 3

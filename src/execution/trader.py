@@ -73,9 +73,15 @@ class Trader:
             streak_limit=int(rcfg.get("dynamic_exclusion_streak_days", 3)),
         )
 
-        # 5. ADX minimum gate — block entries when the symbol has no directional trend.
-        #    Reads min_entry_adx from risk config (default 0 = disabled).
+        # 5. ADX entry filters — three-tier treatment by trend strength:
+        #      ADX < min_entry_adx              → hard block (no trend at all)
+        #      min_entry_adx ≤ ADX < weak_max   → weak-trend zone: higher score
+        #                                          required + tighter daily loss cap
+        #      ADX ≥ weak_max                   → full trend, normal rules apply
         self._min_entry_adx: float = float(rcfg.get("min_entry_adx", 0.0))
+        self._weak_trend_adx_max: float = float(rcfg.get("weak_trend_adx_max", 25.0))
+        self._weak_trend_threshold: float = float(rcfg.get("weak_trend_entry_threshold", 0.55))
+        self._weak_trend_max_losses: int = int(rcfg.get("weak_trend_max_daily_losses", 1))
 
         # 6. Next-day cooloff — symbols that stopped out this cycle
         #    Engine reads this after manage_open_positions and registers bans.
@@ -203,10 +209,12 @@ class Trader:
                 )
                 return
 
-        # ── Filter 4: ADX minimum gate ────────────────────────────────────
-        # Reject entries when the symbol shows no directional trend (low ADX).
-        # Low-ADX stocks are range-bound noise generators — signals fire on
-        # random fluctuations rather than genuine momentum.
+        # ── Filter 4: ADX-tiered entry gate ──────────────────────────────
+        # Three zones based on the symbol's current ADX:
+        #   ADX < min_entry_adx            → hard block (directionless noise)
+        #   min_entry_adx ≤ ADX < weak_max → weak-trend zone: require higher
+        #                                    score AND cap at 1 loss/day
+        #   ADX ≥ weak_max                 → full trend, normal rules apply
         if self._min_entry_adx > 0 and regime_params is not None:
             adx_val = regime_params.get("adx")
             if adx_val is not None and not (adx_val != adx_val):  # not NaN
@@ -216,6 +224,22 @@ class Trader:
                         dec.symbol, adx_val, self._min_entry_adx,
                     )
                     return
+                if adx_val < self._weak_trend_adx_max:
+                    # Weak-trend zone — require higher conviction score
+                    if abs(dec.score) < self._weak_trend_threshold:
+                        log.info(
+                            "SKIP %s — weak trend (ADX=%.1f), score %.3f < %.3f required.",
+                            dec.symbol, adx_val, abs(dec.score), self._weak_trend_threshold,
+                        )
+                        return
+                    # Weak-trend zone — tighter daily loss cap (B+C combined)
+                    weak_losses = self._symbol_daily_losses.get(dec.symbol, 0)
+                    if weak_losses >= self._weak_trend_max_losses:
+                        log.info(
+                            "SKIP %s — weak trend (ADX=%.1f), daily loss cap %d reached.",
+                            dec.symbol, adx_val, self._weak_trend_max_losses,
+                        )
+                        return
 
         # ── No position — consider entry ───────────────────────────────────
         rd = self.risk.check_entry(

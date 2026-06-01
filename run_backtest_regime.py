@@ -105,6 +105,9 @@ def _best_cfg(base: dict) -> dict:
     r["max_hold_minutes"]               = 480
     r["max_symbol_daily_losses"]        = 2
     r["min_entry_adx"]                  = 18        # Fix 1: block low-ADX entries
+    r["weak_trend_adx_max"]             = 25        # B+C: weak-trend zone ceiling
+    r["weak_trend_entry_threshold"]     = 0.55      # C: higher score req in weak zone
+    r["weak_trend_max_daily_losses"]    = 1         # B: 1 loss/day cap in weak zone
     r["dynamic_exclusion_win_rate"]     = 0.30      # Fix 3: tighter bad-symbol gate
     r["dynamic_exclusion_streak_days"]  = 3         # Fix 3: react after 3 bad days
     r["partial_profit_1_pct"]           = 0.01
@@ -426,16 +429,28 @@ class AdaptiveBacktester(Backtester):
                     sym_regime = self._sym_regime(sym, sym_past)
                     pos_params = self._resolve_pos_params(sym_regime)
 
-                    # ── ADX gate ──────────────────────────────────────────────
-                    # Block entries when the symbol has no directional momentum.
-                    # Low-ADX names produce noise entries that hurt win rate.
-                    min_adx = self.cfg.get("risk", {}).get("min_entry_adx", 0.0)
-                    if min_adx > 0:
-                        det = self._regime_detectors.get(sym)
-                        adx_now = det._last_adx if det is not None else None
-                        if adx_now is not None and adx_now == adx_now:  # not NaN
-                            if adx_now < min_adx:
-                                continue  # skip — directionless symbol
+                    # ── ADX-tiered entry gate ─────────────────────────────────
+                    # Zone 1 (ADX < min):          hard block — no trend at all
+                    # Zone 2 (min ≤ ADX < weak_max): weak trend — need higher score
+                    #                               + max 1 loss/day (B+C combined)
+                    # Zone 3 (ADX ≥ weak_max):     full trend — normal rules apply
+                    rcfg_bt   = self.cfg.get("risk", {})
+                    min_adx   = rcfg_bt.get("min_entry_adx", 0.0)
+                    weak_max  = rcfg_bt.get("weak_trend_adx_max", 25.0)
+                    weak_thr  = rcfg_bt.get("weak_trend_entry_threshold", 0.55)
+                    weak_cap  = int(rcfg_bt.get("weak_trend_max_daily_losses", 1))
+                    det       = self._regime_detectors.get(sym)
+                    adx_now   = det._last_adx if det is not None else None
+                    if min_adx > 0 and adx_now is not None and adx_now == adx_now:
+                        if adx_now < min_adx:
+                            continue  # zone 1 — directionless, skip
+                        if adx_now < weak_max:
+                            # zone 2 — weak trend: require higher signal score
+                            if abs(dec.score) < weak_thr:
+                                continue
+                            # zone 2 — weak trend: tighter daily loss cap
+                            if daily_losses.get(sym, 0) >= weak_cap:
+                                continue
 
                     # Only log regime for entries that actually pass all gates.
                     self._regime_log.append((sym, str(ts), sym_regime.value))
