@@ -73,7 +73,11 @@ class Trader:
             streak_limit=int(rcfg.get("dynamic_exclusion_streak_days", 3)),
         )
 
-        # 5. Next-day cooloff — symbols that stopped out this cycle
+        # 5. ADX minimum gate — block entries when the symbol has no directional trend.
+        #    Reads min_entry_adx from risk config (default 0 = disabled).
+        self._min_entry_adx: float = float(rcfg.get("min_entry_adx", 0.0))
+
+        # 6. Next-day cooloff — symbols that stopped out this cycle
         #    Engine reads this after manage_open_positions and registers bans.
         self.recent_stop_losses: set = set()
 
@@ -198,6 +202,20 @@ class Trader:
                     dec.symbol, price, day_open,
                 )
                 return
+
+        # ── Filter 4: ADX minimum gate ────────────────────────────────────
+        # Reject entries when the symbol shows no directional trend (low ADX).
+        # Low-ADX stocks are range-bound noise generators — signals fire on
+        # random fluctuations rather than genuine momentum.
+        if self._min_entry_adx > 0 and regime_params is not None:
+            adx_val = regime_params.get("adx")
+            if adx_val is not None and not (adx_val != adx_val):  # not NaN
+                if adx_val < self._min_entry_adx:
+                    log.info(
+                        "SKIP %s — ADX %.1f below min_entry_adx %.1f (no trend).",
+                        dec.symbol, adx_val, self._min_entry_adx,
+                    )
+                    return
 
         # ── No position — consider entry ───────────────────────────────────
         rd = self.risk.check_entry(

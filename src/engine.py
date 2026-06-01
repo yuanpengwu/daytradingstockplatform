@@ -498,12 +498,16 @@ class TradingEngine:
             log.debug("Regime detection failed for %s: %s — defaulting NEUTRAL", sym, _e)
             regime = MarketRegime.NEUTRAL
 
+        # Expose the raw ADX value so the trader's ADX gate can use it.
+        adx_val = self._sym_regime_detectors[sym]._last_adx
+
         if regime == MarketRegime.TRENDING:
             return {
                 "regime":      "trending",
                 "pp1_pct":     9999.0,   # partial profit disabled — let winner run
                 "pp2_pct":     9999.0,
                 "eod_flatten": False,    # position may run overnight
+                "adx":         adx_val,
             }
         else:
             return {
@@ -511,6 +515,7 @@ class TradingEngine:
                 "pp1_pct":     float(self.config.get("risk", {}).get("partial_profit_1_pct", 0.010)),
                 "pp2_pct":     float(self.config.get("risk", {}).get("partial_profit_2_pct", 0.025)),
                 "eod_flatten": True,     # close before market close as usual
+                "adx":         adx_val,
             }
 
     # ---------- windowing helpers ----------

@@ -104,8 +104,9 @@ def _best_cfg(base: dict) -> dict:
     r["min_hold_minutes"]               = 45
     r["max_hold_minutes"]               = 480
     r["max_symbol_daily_losses"]        = 2
-    r["dynamic_exclusion_win_rate"]     = 0.25
-    r["dynamic_exclusion_streak_days"]  = 5
+    r["min_entry_adx"]                  = 18        # Fix 1: block low-ADX entries
+    r["dynamic_exclusion_win_rate"]     = 0.30      # Fix 3: tighter bad-symbol gate
+    r["dynamic_exclusion_streak_days"]  = 3         # Fix 3: react after 3 bad days
     r["partial_profit_1_pct"]           = 0.01
     r["partial_profit_2_pct"]           = 0.025
     r["trailing_stop_pct"]              = 0.03
@@ -413,6 +414,32 @@ class AdaptiveBacktester(Backtester):
                 )
 
                 if can_enter and dec.action == "BUY":
+                    # ── Per-symbol regime detection ───────────────────────────
+                    # Use the FULL bars for this symbol (train + test) so
+                    # ADX has adequate history from the very first test-period
+                    # entry.  Filter to strictly prior-day bars to avoid lookahead.
+                    hist_df = self.full_bars.get(sym, df)
+                    sym_day_ts = _day_ts
+                    if hist_df.index.tz is not None and sym_day_ts.tzinfo is None:
+                        sym_day_ts = sym_day_ts.tz_localize(hist_df.index.tz)
+                    sym_past = hist_df[hist_df.index.normalize() < sym_day_ts]
+                    sym_regime = self._sym_regime(sym, sym_past)
+                    pos_params = self._resolve_pos_params(sym_regime)
+
+                    # ── ADX gate ──────────────────────────────────────────────
+                    # Block entries when the symbol has no directional momentum.
+                    # Low-ADX names produce noise entries that hurt win rate.
+                    min_adx = self.cfg.get("risk", {}).get("min_entry_adx", 0.0)
+                    if min_adx > 0:
+                        det = self._regime_detectors.get(sym)
+                        adx_now = det._last_adx if det is not None else None
+                        if adx_now is not None and adx_now == adx_now:  # not NaN
+                            if adx_now < min_adx:
+                                continue  # skip — directionless symbol
+
+                    # Only log regime for entries that actually pass all gates.
+                    self._regime_log.append((sym, str(ts), sym_regime.value))
+
                     target_pct  = min(
                         abs(dec.score) * dec.confidence * self.kelly,
                         self.max_position_pct,
@@ -423,21 +450,6 @@ class AdaptiveBacktester(Backtester):
                     cost       = qty * entry_fill
                     if qty >= 1 and cost <= cash:
                         cash -= cost
-
-                        # ── Per-symbol regime detection ────────────────────
-                        # Use the FULL bars for this symbol (train + test) so
-                        # ADX has adequate history from the very first test-period
-                        # entry.  Filter to strictly prior-day bars to avoid
-                        # lookahead.  Falls back to test-only bars if full_bars
-                        # wasn't set.
-                        hist_df = self.full_bars.get(sym, df)
-                        sym_day_ts = _day_ts
-                        if hist_df.index.tz is not None and sym_day_ts.tzinfo is None:
-                            sym_day_ts = sym_day_ts.tz_localize(hist_df.index.tz)
-                        sym_past = hist_df[hist_df.index.normalize() < sym_day_ts]
-                        sym_regime = self._sym_regime(sym, sym_past)
-                        pos_params = self._resolve_pos_params(sym_regime)
-                        self._regime_log.append((sym, str(ts), sym_regime.value))
 
                         open_pos[sym] = {
                             "side":           "long",
