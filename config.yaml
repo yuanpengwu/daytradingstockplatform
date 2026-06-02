@@ -100,8 +100,7 @@ signals:
     daily_timesteps: 50000        # PPO steps for each daily incremental update (faster ~30s GPU)
     device: auto                  # auto | cpu | cuda
 regime:
-  adx_trend_thresh: 30    # ADX must reach 30+ to route exits as TRENDING (let winners run)
-                           # Raised from 25 → fewer false "trending" calls in weak markets
+  adx_trend_thresh: 25    # ADX must reach 25+ to route exits as TRENDING (let winners run)
   adx_choppy_thresh: 20   # ADX below 20 = CHOPPY (partial profit + EOD flatten)
 risk:
   max_position_pct: 0.1
