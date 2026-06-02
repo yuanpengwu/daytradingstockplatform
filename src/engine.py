@@ -498,7 +498,7 @@ class TradingEngine:
             log.debug("Regime detection failed for %s: %s — defaulting NEUTRAL", sym, _e)
             regime = MarketRegime.NEUTRAL
 
-        # Expose the raw ADX value so the trader's ADX gate can use it.
+        # Expose ADX value so the trader's entry gate can use it.
         adx_val = self._sym_regime_detectors[sym]._last_adx
 
         if regime == MarketRegime.TRENDING:

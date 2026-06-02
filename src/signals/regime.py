@@ -333,6 +333,7 @@ class MarketRegimeDetector:
         self._last_votes_trending: int = 0
         self._last_votes_choppy:   int = 0
 
+
     # ------------------------------------------------------------------
     def detect(self, spy_bars: pd.DataFrame) -> MarketRegime:
         """Classify today's regime from SPY bars available up to *now*.

@@ -225,14 +225,14 @@ class Trader:
                     )
                     return
                 if adx_val < self._weak_trend_adx_max:
-                    # Weak-trend zone — require higher conviction score
+                    # Weak-trend zone (min_entry_adx ≤ ADX < weak_max):
+                    # require higher conviction score AND cap at 1 loss/day.
                     if abs(dec.score) < self._weak_trend_threshold:
                         log.info(
                             "SKIP %s — weak trend (ADX=%.1f), score %.3f < %.3f required.",
                             dec.symbol, adx_val, abs(dec.score), self._weak_trend_threshold,
                         )
                         return
-                    # Weak-trend zone — tighter daily loss cap (B+C combined)
                     weak_losses = self._symbol_daily_losses.get(dec.symbol, 0)
                     if weak_losses >= self._weak_trend_max_losses:
                         log.info(

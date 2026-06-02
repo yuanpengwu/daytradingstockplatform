@@ -406,6 +406,64 @@ class FinRLSignal:
         confidence = float(np.clip(abs(p_buy - p_sell), 0.0, 1.0))
         return score, confidence
 
+    # ── Backtest batch pre-computation ────────────────────────────────────
+
+    def precompute_backtest_scores(
+        self,
+        bars_by_symbol: Dict[str, "pd.DataFrame"],
+    ) -> None:
+        """Pre-compute FinRL scores for every bar of every symbol in one GPU batch.
+
+        Call once before the backtest loop.  Subsequent ``evaluate()`` calls
+        check ``_bt_cache`` first and return instantly, eliminating the O(N²)
+        feature recomputation and the per-bar GPU dispatch overhead.
+
+        Results are stored in ``self._bt_cache[sym]`` as a dict mapping each
+        bar timestamp → (score, confidence).
+        """
+        if self._model is None:
+            log.warning("FinRL: precompute skipped — model not trained.")
+            return
+
+        import torch
+        from stable_baselines3.common.utils import obs_as_tensor
+
+        self._bt_cache: Dict[str, Dict] = {}
+        total_bars = sum(len(df) for df in bars_by_symbol.values())
+        log.info(
+            "FinRL: pre-computing scores for %d symbols / %d bars …",
+            len(bars_by_symbol), total_bars,
+        )
+
+        for sym, df in bars_by_symbol.items():
+            feats = _compute_features(df)
+            if feats is None or len(feats) == 0:
+                self._bt_cache[sym] = {}
+                continue
+
+            # Single GPU batch for all bars of this symbol
+            obs_batch = torch.tensor(
+                feats.astype(np.float32), device=self._model.device
+            )
+            try:
+                with torch.no_grad():
+                    dist  = self._model.policy.get_distribution(obs_batch)
+                    probs = dist.distribution.probs.cpu().numpy()  # (N, 2)
+            except Exception as exc:
+                log.debug("FinRL batch inference failed for %s (%s) — zeros.", sym, exc)
+                self._bt_cache[sym] = {}
+                continue
+
+            cache: Dict = {}
+            for i, ts in enumerate(df.index):
+                p_sell, p_buy = float(probs[i, 0]), float(probs[i, 1])
+                score = float(np.clip(p_buy - p_sell, -1.0, 1.0))
+                conf  = float(np.clip(abs(p_buy - p_sell), 0.0, 1.0))
+                cache[ts] = (score, conf)
+            self._bt_cache[sym] = cache
+
+        log.info("FinRL: pre-computation complete.")
+
     # ── Public evaluate ────────────────────────────────────────────────────
 
     def evaluate(
@@ -427,7 +485,24 @@ class FinRLSignal:
         if tech_signal is None or abs(tech_signal.score) < self.tech_threshold:
             return _null_signal(symbol, "tech score below threshold")
 
-        # Cache: reuse prediction for `horizon` minutes to avoid redundant work
+        # Backtest pre-computation cache: O(1) lookup, zero GPU dispatch
+        bt_sym_cache = getattr(self, "_bt_cache", {}).get(symbol)
+        if bt_sym_cache is not None and not bars.empty:
+            ts = bars.index[-1]
+            entry = bt_sym_cache.get(ts)
+            if entry is not None:
+                score, conf = entry
+                if conf >= self.min_conf:
+                    return Signal(
+                        symbol=symbol,
+                        source=SignalSource.FINRL,
+                        score=score,
+                        confidence=conf,
+                        metadata={"provider": "finrl_ppo"},
+                    )
+                return _null_signal(symbol, f"low confidence ({conf:.2f})")
+
+        # Live path: per-call inference with 5-min wall-clock cache
         cached = self._sym_cache.get(symbol)
         if cached and (datetime.now() - cached[0]) < timedelta(minutes=5):
             return cached[1]
