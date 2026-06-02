@@ -51,11 +51,12 @@ class MarketData:
         # Fixed-range fetch — skip cache entirely (each range is unique)
         if start_dt is not None or end_dt is not None:
             if self.provider == "alpaca":
-                return self._fetch_alpaca(symbol, start_dt=start_dt, end_dt=end_dt) or pd.DataFrame()
+                result = self._fetch_alpaca(symbol, start_dt=start_dt, end_dt=end_dt)
             elif self.provider == "polygon":
-                return self._fetch_polygon(symbol) or pd.DataFrame()
+                result = self._fetch_polygon(symbol)
             else:
-                return self._fetch_yfinance(symbol, start_dt=start_dt, end_dt=end_dt) or pd.DataFrame()
+                result = self._fetch_yfinance(symbol, start_dt=start_dt, end_dt=end_dt)
+            return result if result is not None else pd.DataFrame()
 
         now = datetime.utcnow()
         cached_at = self._cache_ts.get(symbol)

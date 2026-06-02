@@ -89,6 +89,11 @@ with open(ROOT / "config.yaml") as f:
 
 STARTING_CASH = float(BASE_CFG["broker"].get("starting_cash", 10_000))
 
+# ── Regime detector thresholds ────────────────────────────────────────────────
+_REGIME_CFG       = BASE_CFG.get("regime", {})
+ADX_TREND_THRESH  = float(_REGIME_CFG.get("adx_trend_thresh",  25.0))
+ADX_CHOPPY_THRESH = float(_REGIME_CFG.get("adx_choppy_thresh", 20.0))
+
 # ── Regime params  ────────────────────────────────────────────────────────────
 
 # Per-position params stored at entry time for TRENDING days (OLD-style).
@@ -199,7 +204,7 @@ class AdaptiveBacktester(Backtester):
     ) -> MarketRegime:
         """Return this symbol's current regime (no lookahead — past bars only)."""
         if sym not in self._regime_detectors:
-            self._regime_detectors[sym] = MarketRegimeDetector()
+            self._regime_detectors[sym] = MarketRegimeDetector(adx_trend_thresh=ADX_TREND_THRESH, adx_choppy_thresh=ADX_CHOPPY_THRESH)
         return self._regime_detectors[sym].detect(sym_bars_past)
 
     @staticmethod
@@ -561,7 +566,7 @@ class AdaptiveBacktester(Backtester):
             parts = "  ".join(
                 f"{r}={n}" for r, n in sorted(by_sym[sym].items())
             )
-            det_status = self._regime_detectors.get(sym, MarketRegimeDetector()).status
+            det_status = self._regime_detectors.get(sym, MarketRegimeDetector(adx_trend_thresh=ADX_TREND_THRESH, adx_choppy_thresh=ADX_CHOPPY_THRESH)).status
             adx_str = f"ADX={det_status['adx']:.1f}" if det_status["adx"] else "ADX=n/a"
             print(f"    {sym:<6s}  {parts}  ({adx_str})")
 

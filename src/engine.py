@@ -490,7 +490,11 @@ class TradingEngine:
             return {"regime": "neutral", "pp1_pct": 0.010, "pp2_pct": 0.025, "eod_flatten": True}
 
         if sym not in self._sym_regime_detectors:
-            self._sym_regime_detectors[sym] = MarketRegimeDetector()
+            _rcfg = self.config.get("regime", {})
+            self._sym_regime_detectors[sym] = MarketRegimeDetector(
+                adx_trend_thresh=float(_rcfg.get("adx_trend_thresh", 25.0)),
+                adx_choppy_thresh=float(_rcfg.get("adx_choppy_thresh", 20.0)),
+            )
 
         try:
             regime = self._sym_regime_detectors[sym].detect(bars)
