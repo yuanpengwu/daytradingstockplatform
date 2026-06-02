@@ -236,6 +236,22 @@ def notify_order_entry(
             _notify_discord_embed(embed_payload)
 
 
+# Human-readable exit reason labels
+_REASON_DISPLAY: Dict[str, str] = {
+    "signal_reversed":    "🔄 Signal Reversed",
+    "eod_flatten":        "🌙 EOD Flatten",
+    "take_profit":        "🎯 Take Profit",
+    "partial_profit_1":   "💰 Partial Profit #1",
+    "partial_profit_2":   "💰 Partial Profit #2",
+    "stop":               "🛑 Stop Loss",
+    "stop_loss":          "🛑 Stop Loss",
+    "breakeven_stop":     "⚖️ Breakeven Stop",
+    "max_hold":           "⏱️ Max Hold Time",
+    "stale_position":     "⏰ Stale Position",
+    "trailing_stop":      "📉 Trailing Stop",
+}
+
+
 def notify_order_exit(
     *,
     symbol: str,
@@ -251,10 +267,10 @@ def notify_order_exit(
     channels: Iterable[str] = ("console",),
 ) -> None:
     """Rich exit notification with P&L, duration, and trade summary."""
-    won      = pnl >= 0
+    won        = pnl >= 0
     is_partial = partial_num is not None
     if is_partial:
-        icon  = "🔶"   # orange diamond for partial
+        icon  = "🔶"
         color = _COLOR_WARN
         label = f"PARTIAL #{partial_num} EXIT"
     else:
@@ -262,13 +278,16 @@ def notify_order_exit(
         color = _COLOR_BUY if won else _COLOR_SELL
         label = "EXIT"
 
+    # Human-readable reason (fall back to raw code if not in map)
+    reason_display = _REASON_DISPLAY.get(reason.lower(), f"📋 {reason.replace('_', ' ').title()}")
+
     # Duration
     duration_str = None
     if held_since is not None:
         elapsed = (datetime.now() - held_since).total_seconds()
         duration_str = _fmt_duration(elapsed)
 
-    # Plain-text
+    # ── Plain-text fallback ───────────────────────────────────────────────
     price_part = ""
     if entry_price and exit_price:
         price_part = f" @ ${entry_price:.2f}→${exit_price:.2f}"
@@ -280,22 +299,25 @@ def notify_order_exit(
         f"reason={reason}{dur_part}"
     )
 
-    # Discord embed fields
-    fields = [
-        # Row 1: side, qty, reason
-        {"name": "Side",   "value": f"`{side.upper()}`", "inline": True},
-        {"name": "Qty",    "value": f"`{qty:.0f} sh`",   "inline": True},
-        {"name": "Reason", "value": f"`{reason}`",        "inline": True},
-
-        # Row 2: P&L
+    # ── Discord embed ─────────────────────────────────────────────────────
+    # Row 1 — prominent exit reason (full width so it reads at a glance)
+    fields: list = [
         {
-            "name":   "Realised P&L",
-            "value":  f"`{pnl:+.2f}` `({pnl_pct*100:+.2f}%)`",
-            "inline": True,
+            "name":   "Exit Reason",
+            "value":  f"**{reason_display}**  `{reason}`",
+            "inline": False,
         },
     ]
 
-    # Entry → Exit price comparison
+    # Row 2 — P&L
+    pnl_sign = "▲" if won else "▼"
+    fields.append({
+        "name":   "Realised P&L",
+        "value":  f"`{pnl_sign} {pnl:+.2f}` `({pnl_pct*100:+.2f}%)`",
+        "inline": True,
+    })
+
+    # Row 2 cont — entry → exit price (inline with P&L)
     if entry_price is not None and exit_price is not None:
         fields.append({
             "name":   "Price",
@@ -303,13 +325,19 @@ def notify_order_exit(
             "inline": True,
         })
 
-    # Hold duration
+    # Row 2 cont — hold duration
     if duration_str:
         fields.append({
             "name":   "Held",
             "value":  f"`{duration_str}`",
             "inline": True,
         })
+
+    # Row 3 — side & qty (lower priority info)
+    fields += [
+        {"name": "Side", "value": f"`{side.upper()}`",  "inline": True},
+        {"name": "Qty",  "value": f"`{qty:.0f} sh`",    "inline": True},
+    ]
 
     embed_payload = {
         "embeds": [{
