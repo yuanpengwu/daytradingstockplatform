@@ -34,8 +34,29 @@ class MarketData:
         self._cache_ts: Dict[str, datetime] = {}
         self._alpaca_client = None  # lazily created
 
-    def get_bars(self, symbol: str, force_refresh: bool = False) -> pd.DataFrame:
-        """Return a DataFrame with columns [Open, High, Low, Close, Volume]."""
+    def get_bars(
+        self,
+        symbol: str,
+        force_refresh: bool = False,
+        start_dt: Optional[datetime] = None,
+        end_dt: Optional[datetime] = None,
+    ) -> pd.DataFrame:
+        """Return a DataFrame with columns [Open, High, Low, Close, Volume].
+
+        *start_dt* / *end_dt* — if provided, fetch exactly that date range
+        instead of using ``lookback_days`` from now.  Both must be timezone-aware
+        (UTC) or naive UTC datetimes.  Bypasses the cache so every call fetches
+        fresh data for that range.
+        """
+        # Fixed-range fetch — skip cache entirely (each range is unique)
+        if start_dt is not None or end_dt is not None:
+            if self.provider == "alpaca":
+                return self._fetch_alpaca(symbol, start_dt=start_dt, end_dt=end_dt) or pd.DataFrame()
+            elif self.provider == "polygon":
+                return self._fetch_polygon(symbol) or pd.DataFrame()
+            else:
+                return self._fetch_yfinance(symbol, start_dt=start_dt, end_dt=end_dt) or pd.DataFrame()
+
         now = datetime.utcnow()
         cached_at = self._cache_ts.get(symbol)
         max_age = self._max_cache_age()
@@ -91,8 +112,13 @@ class MarketData:
             return TimeFrame(amt, TimeFrameUnit.Day)
         return TimeFrame(5, TimeFrameUnit.Minute)
 
-    def _fetch_alpaca(self, symbol: str) -> Optional[pd.DataFrame]:
-        """Fetch recent bars from Alpaca.
+    def _fetch_alpaca(
+        self,
+        symbol: str,
+        start_dt: Optional[datetime] = None,
+        end_dt: Optional[datetime] = None,
+    ) -> Optional[pd.DataFrame]:
+        """Fetch bars from Alpaca.
 
         Feed selection:
           iex — free/paper accounts. Cannot serve roughly the last 15 minutes
@@ -101,6 +127,8 @@ class MarketData:
           sip — full consolidated tape (NYSE + NASDAQ + all exchanges).
                 Requires Algo Trader Plus subscription ($99/mo). Use this for
                 live accounts to get accurate VWAP, prices, and stop levels.
+
+        *start_dt* / *end_dt* override the default lookback-from-now window.
         """
         try:
             from alpaca.data.requests import StockBarsRequest
@@ -114,8 +142,14 @@ class MarketData:
 
         try:
             client = self._get_alpaca_client()
-            end = datetime.now(timezone.utc)
-            start = end - timedelta(days=self.lookback_days)
+            if end_dt is not None:
+                end = end_dt if end_dt.tzinfo else end_dt.replace(tzinfo=timezone.utc)
+            else:
+                end = datetime.now(timezone.utc)
+            if start_dt is not None:
+                start = start_dt if start_dt.tzinfo else start_dt.replace(tzinfo=timezone.utc)
+            else:
+                start = end - timedelta(days=self.lookback_days)
             req = StockBarsRequest(
                 symbol_or_symbols=symbol,
                 timeframe=self._alpaca_timeframe(),
@@ -141,12 +175,21 @@ class MarketData:
             return None
 
     # ---------- yfinance ----------
-    def _fetch_yfinance(self, symbol: str, retries: int = 3) -> Optional[pd.DataFrame]:
+    def _fetch_yfinance(
+        self,
+        symbol: str,
+        retries: int = 3,
+        start_dt: Optional[datetime] = None,
+        end_dt: Optional[datetime] = None,
+    ) -> Optional[pd.DataFrame]:
         """Fetch bars from yfinance with a few retries.
 
         yfinance is rate-limited and intermittently returns empty data even
         for valid tickers, so we retry a couple of times with a short backoff
         before giving up. Failures are handled gracefully by the caller.
+
+        *start_dt* / *end_dt* override the default lookback-from-now window.
+        Note: yfinance only provides intraday bars for the last 60 days.
         """
         import time as _time
 
@@ -156,18 +199,31 @@ class MarketData:
             log.warning("yfinance not installed.")
             return None
 
-        period_days = min(self.lookback_days, 59 if self.interval.endswith("m") else 365)
         last_err = None
         for attempt in range(1, retries + 1):
             try:
-                df = yf.download(
-                    symbol,
-                    period=f"{period_days}d",
-                    interval=self.interval,
-                    progress=False,
-                    auto_adjust=False,
-                    prepost=False,
-                )
+                if start_dt is not None or end_dt is not None:
+                    _end = (end_dt or datetime.utcnow()).strftime("%Y-%m-%d")
+                    _start = (start_dt or (datetime.utcnow() - timedelta(days=self.lookback_days))).strftime("%Y-%m-%d")
+                    df = yf.download(
+                        symbol,
+                        start=_start,
+                        end=_end,
+                        interval=self.interval,
+                        progress=False,
+                        auto_adjust=False,
+                        prepost=False,
+                    )
+                else:
+                    period_days = min(self.lookback_days, 59 if self.interval.endswith("m") else 365)
+                    df = yf.download(
+                        symbol,
+                        period=f"{period_days}d",
+                        interval=self.interval,
+                        progress=False,
+                        auto_adjust=False,
+                        prepost=False,
+                    )
                 if df is not None and not df.empty:
                     if isinstance(df.columns, pd.MultiIndex):
                         df.columns = df.columns.get_level_values(0)

@@ -25,10 +25,12 @@ Per-position routing (stored at entry, respected until exit):
 """
 from __future__ import annotations
 
+import argparse
 import copy
 import os
 import sys
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -48,10 +50,31 @@ from src.signals.finrl_signal import FinRLSignal
 from src.signals.ml_model import MLSignal
 from src.signals.regime import MarketRegime, MarketRegimeDetector
 
+# ── CLI arguments ─────────────────────────────────────────────────────────────
+
+def _parse_date(s: str) -> datetime:
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    raise argparse.ArgumentTypeError(f"Unrecognised date '{s}'. Use YYYY/MM/DD or YYYY-MM-DD.")
+
+_ap = argparse.ArgumentParser(description="Regime-adaptive A/B/C backtest")
+_ap.add_argument("--start", type=_parse_date, default=None,
+                 metavar="YYYY/MM/DD",
+                 help="Custom start date for fetched data (default: today − lookback)")
+_ap.add_argument("--end",   type=_parse_date, default=None,
+                 metavar="YYYY/MM/DD",
+                 help="Custom end date for fetched data (default: today)")
+_ap.add_argument("--interval", default=None, metavar="Nm",
+                 help="Bar interval override, e.g. 1m, 5m, 1d (default: 5m)")
+_ARGS = _ap.parse_args()
+
 # ── Parameters ────────────────────────────────────────────────────────────────
 
 LOOKBACK_DAYS = 180
-INTERVAL      = "5m"
+INTERVAL      = _ARGS.interval or "5m"
 FINRL_STEPS   = 150_000
 SLIPPAGE_BPS  = 5
 
@@ -648,15 +671,21 @@ def _print_comparison(adaptive: dict, best: dict, old: dict) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+_date_range_str = (
+    f"{_ARGS.start.strftime('%Y-%m-%d')} → {_ARGS.end.strftime('%Y-%m-%d')}"
+    if _ARGS.start or _ARGS.end
+    else f"last {LOOKBACK_DAYS} calendar days"
+)
+
 print(f"\n{'='*60}")
-print(f"  DayTradingBot — Regime-Adaptive 6-month A/B/C backtest")
-print(f"  Interval: {INTERVAL}  |  Lookback: {LOOKBACK_DAYS} cal days")
+print(f"  DayTradingBot — Regime-Adaptive A/B/C backtest")
+print(f"  Interval: {INTERVAL}  |  Range: {_date_range_str}")
 print(f"  Cash: ${STARTING_CASH:,.0f}   Slippage: {SLIPPAGE_BPS} bps")
 print(f"  Tickers ({len(TICKERS)}): {', '.join(TICKERS)}")
 print(f"{'='*60}\n")
 
 # Step 1 — Fetch data
-print(f"Fetching {INTERVAL} bars ({LOOKBACK_DAYS} calendar days) …")
+print(f"Fetching {INTERVAL} bars ({_date_range_str}) …")
 md = MarketData(
     provider=BASE_CFG["data"].get("provider", "alpaca"),
     interval=INTERVAL,
@@ -665,7 +694,7 @@ md = MarketData(
 )
 bars_by_sym: dict = {}
 for sym in TICKERS:
-    df = md.get_bars(sym)
+    df = md.get_bars(sym, start_dt=_ARGS.start, end_dt=_ARGS.end)
     if df is not None and not df.empty:
         bars_by_sym[sym] = df
         print(f"  {sym:<6s}  {len(df):6d} bars  "
