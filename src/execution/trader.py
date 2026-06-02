@@ -301,9 +301,13 @@ class Trader:
                 price=fill_price,
                 agg_score=dec.score,
                 confidence=dec.confidence,
+                min_confidence=dec.min_confidence,
+                agreement_ok=dec.agreement_ok,
                 components=dec.components,
                 stop_loss=rd.stop_loss,
                 take_profit=rd.take_profit,
+                regime_params=regime_params,
+                enter_threshold=dec.enter_long if is_buy else dec.enter_short,
                 channels=self.notify_channels,
             )
 
@@ -419,6 +423,7 @@ class Trader:
                 "Partial exit %s | qty=%g reason=%s pnl=%.2f%%",
                 symbol, qty, reason, pnl_pct * 100,
             )
+            partial_num = self._partial_exits.get(symbol, 0) + 1
             notify_order_exit(
                 symbol=symbol,
                 side="sell",
@@ -426,6 +431,10 @@ class Trader:
                 pnl=realized_pnl,
                 pnl_pct=pnl_pct,
                 reason=reason,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                held_since=self._entry_time.get(symbol),
+                partial_num=partial_num,
                 channels=self.notify_channels,
             )
             if self.trade_history is not None:
@@ -500,6 +509,9 @@ class Trader:
                 pnl=realized_pnl,
                 pnl_pct=realized_pnl_pct,
                 reason=reason,
+                entry_price=position.avg_entry_price,
+                exit_price=exit_price,
+                held_since=self._entry_time.get(position.symbol),
                 channels=self.notify_channels,
             )
             if self.trade_history is not None:
