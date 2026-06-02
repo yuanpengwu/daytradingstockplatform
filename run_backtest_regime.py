@@ -71,23 +71,24 @@ _ap.add_argument("--interval", default=None, metavar="Nm",
                  help="Bar interval override, e.g. 1m, 5m, 1d (default: 5m)")
 _ARGS = _ap.parse_args()
 
+# ── Config (load before Parameters so FINRL_STEPS can read it) ───────────────
+
+with open(ROOT / "config.yaml") as f:
+    BASE_CFG = yaml.safe_load(f)
+
 # ── Parameters ────────────────────────────────────────────────────────────────
 
 LOOKBACK_DAYS = 180
 INTERVAL      = _ARGS.interval or "5m"
 FINRL_STEPS   = int(BASE_CFG.get("signals", {}).get("finrl", {}).get("total_timesteps", 150_000))
 SLIPPAGE_BPS  = 5
+STARTING_CASH = float(BASE_CFG["broker"].get("starting_cash", 10_000))
 
 TICKERS = [
     "CRM", "ADBE", "MSFT", "AVGO", "AMD",
     "VMC", "NUE", "AAPL", "NVDA", "TSLA",
     "META", "GOOGL", "AMZN", "SPY", "QQQ",
 ]
-
-with open(ROOT / "config.yaml") as f:
-    BASE_CFG = yaml.safe_load(f)
-
-STARTING_CASH = float(BASE_CFG["broker"].get("starting_cash", 10_000))
 
 # ── Regime detector thresholds ────────────────────────────────────────────────
 _REGIME_CFG       = BASE_CFG.get("regime", {})
