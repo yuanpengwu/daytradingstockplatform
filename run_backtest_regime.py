@@ -75,7 +75,7 @@ _ARGS = _ap.parse_args()
 
 LOOKBACK_DAYS = 180
 INTERVAL      = _ARGS.interval or "5m"
-FINRL_STEPS   = 150_000
+FINRL_STEPS   = int(BASE_CFG.get("signals", {}).get("finrl", {}).get("total_timesteps", 150_000))
 SLIPPAGE_BPS  = 5
 
 TICKERS = [

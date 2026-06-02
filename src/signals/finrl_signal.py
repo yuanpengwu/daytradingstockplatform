@@ -97,7 +97,8 @@ class TradingEnv(_gym.Env):
                   (No HOLD option — forcing a directional decision prevents the
                    common RL pathology where the agent collapses to always-HOLD
                    because its reward=0 is "safe" vs noisy BUY/SELL.)
-    Reward      : direction × next_bar_return × 100 − tc_cost
+    Reward      : direction × sum(next reward_horizon bar returns) − tc_cost
+                  − drawdown_penalty × max(0, -cumulative_return)
                   Normalised by rolling return std so rewards are comparable
                   across symbols with different volatility.
     Episode     : one full sequence of bars (reset restarts from bar 0)
@@ -113,7 +114,14 @@ class TradingEnv(_gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, features: np.ndarray, returns: np.ndarray, tc_pct: float = 0.0005):
+    def __init__(
+        self,
+        features: np.ndarray,
+        returns: np.ndarray,
+        tc_pct: float = 0.0005,
+        reward_horizon: int = 6,       # look-ahead bars for reward (default: 6 × 5m = 30 min)
+        drawdown_penalty: float = 0.5, # penalise consecutive losses
+    ):
         super().__init__()
 
         self.observation_space = _gym.spaces.Box(
@@ -121,28 +129,41 @@ class TradingEnv(_gym.Env):
         )
         self.action_space = _gym.spaces.Discrete(2)   # 0=SELL, 1=BUY
 
-        self.features = features.astype(np.float32)
+        self.features         = features.astype(np.float32)
+        self.reward_horizon   = max(1, reward_horizon)
+        self.drawdown_penalty = drawdown_penalty
 
         # Normalise returns so reward scale is consistent across symbols.
-        # Target std ≈ 1.0 so reward is dimensionless.
         ret_std = float(np.std(returns))
-        self.returns  = (returns / ret_std).astype(np.float32) if ret_std > 1e-9 else returns.astype(np.float32)
-        self.tc_pct   = tc_pct / (ret_std if ret_std > 1e-9 else 1.0)   # scale tc too
-        self.n        = len(features)
-        self._step    = 0
+        self._ret_std = ret_std if ret_std > 1e-9 else 1.0
+        self.returns  = (returns / self._ret_std).astype(np.float32)
+        self.tc_pct   = tc_pct / self._ret_std
+
+        self.n       = len(features)
+        self._step   = 0
+        self._cum_ret = 0.0   # running cumulative return for drawdown penalty
 
     def reset(self, *, seed: Optional[int] = None, options=None):
         super().reset(seed=seed)
-        self._step = 0
+        self._step    = 0
+        self._cum_ret = 0.0
         return self.features[0].copy(), {}
 
     def step(self, action: int):
-        ret = float(self.returns[self._step]) if self._step < len(self.returns) else 0.0
+        # Sum returns over the next reward_horizon bars (multi-bar look-ahead)
+        end = min(self._step + self.reward_horizon, len(self.returns))
+        horizon_ret = float(self.returns[self._step:end].sum())
 
         direction = 1.0 if action == 1 else -1.0   # BUY=+1, SELL=-1
-        reward    = float(direction * ret - self.tc_pct)
+        trade_ret = direction * horizon_ret
 
-        self._step += 1
+        # Drawdown penalty: extra cost for a loss on top of the cumulative loss
+        self._cum_ret += trade_ret
+        dd_penalty = self.drawdown_penalty * max(0.0, -self._cum_ret) if self._cum_ret < 0 else 0.0
+
+        reward = float(trade_ret - self.tc_pct - dd_penalty)
+
+        self._step += self.reward_horizon   # advance by full horizon
         done = self._step >= self.n - 1
         obs  = self.features[min(self._step, self.n - 1)].copy()
         return obs, reward, done, False, {}
@@ -280,8 +301,10 @@ class FinRLSignal:
         R      = np.concatenate(all_rets).astype(np.float32)
         n_syms = len(all_feats)
 
-        device  = _detect_device(self._cfg_device)
-        env     = TradingEnv(X, R)
+        device         = _detect_device(self._cfg_device)
+        reward_horizon = int(self.cfg.get("reward_horizon", 6))
+        dd_penalty     = float(self.cfg.get("drawdown_penalty", 0.5))
+        env     = TradingEnv(X, R, reward_horizon=reward_horizon, drawdown_penalty=dd_penalty)
         vec_env = DummyVecEnv([lambda: env])
 
         incremental = self._model is not None and self._trained_at is not None
@@ -316,18 +339,23 @@ class FinRLSignal:
 
         if not incremental:
             # ── Full retrain from scratch ──────────────────────────────────
+            seed = int(self.cfg.get("seed", 42))
             model = PPO(
                 "MlpPolicy",
                 vec_env,
                 n_steps       = min(512, max(64, len(X) // 8)),
                 batch_size    = 64,
                 n_epochs      = 10,
-                learning_rate = 1e-4,
+                learning_rate = float(self.cfg.get("learning_rate", 1e-4)),
                 gamma         = 0.99,
                 gae_lambda    = 0.95,
                 clip_range    = 0.20,
                 ent_coef      = 0.05,   # higher entropy → prevents always-HOLD collapse
-                policy_kwargs = dict(net_arch=[dict(pi=[128, 64], vf=[128, 64])]),
+                policy_kwargs = dict(net_arch=[dict(
+                    pi=list(self.cfg.get("net_arch_pi", [128, 64])),
+                    vf=list(self.cfg.get("net_arch_vf", [128, 64])),
+                )]),
+                seed          = seed,
                 verbose       = 0,
                 device        = device,
             )

@@ -96,9 +96,15 @@ signals:
     retrain_days: 1               # retrain every trading day (incremental — keeps prior knowledge)
     min_confidence: 0.40          # lower than ML: RL needs more steps to reach high conviction
     tech_threshold: 0.10          # lowered: run inference on all meaningful symbols
-    total_timesteps: 200000       # PPO steps for initial full train
+    total_timesteps: 500000       # PPO steps for initial full train (was 200k — more = better convergence)
     daily_timesteps: 50000        # PPO steps for each daily incremental update (faster ~30s GPU)
     device: auto                  # auto | cpu | cuda
+    seed: 42                      # fixed seed → reproducible training across runs
+    reward_horizon: 6             # look-ahead bars for reward (6 × 5m = 30 min trend capture)
+    drawdown_penalty: 0.5         # extra penalty for consecutive losses
+    learning_rate: 0.0001         # PPO learning rate
+    net_arch_pi: [256, 128]       # policy network (was [128, 64] — larger = more capacity)
+    net_arch_vf: [256, 128]       # value network
 regime:
   adx_trend_thresh: 25    # ADX must reach 25+ to route exits as TRENDING (let winners run)
   adx_choppy_thresh: 20   # ADX below 20 = CHOPPY (partial profit + EOD flatten)
