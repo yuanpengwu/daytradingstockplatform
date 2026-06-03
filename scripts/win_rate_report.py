@@ -116,22 +116,31 @@ def _stats(trades: List[ClosedTrade], days: int) -> dict:
     window = [t for t in trades if t.closed_at >= cutoff]
     if not window:
         return dict(n=0, wins=0, losses=0, wr=None, pnl=0.0,
-                    avg_win=0.0, avg_loss=0.0, pf=None)
+                    avg_win_pct=0.0, avg_loss_pct=0.0,
+                    avg_win_usd=0.0, avg_loss_usd=0.0, pf=None)
     wins   = [t for t in window if t.won]
     losses = [t for t in window if not t.won]
     pf = (
         abs(sum(t.pnl for t in wins)) / abs(sum(t.pnl for t in losses))
         if losses and wins else None
     )
+    # Dollar-weighted averages — what actually drives P&L
+    avg_win_usd  = sum(t.pnl for t in wins)   / len(wins)   if wins   else 0.0
+    avg_loss_usd = sum(t.pnl for t in losses) / len(losses) if losses else 0.0
+    # Pct averages kept for reference (unweighted by position size)
+    avg_win_pct  = sum(t.pnl_pct for t in wins)   / len(wins)   * 100 if wins   else 0.0
+    avg_loss_pct = sum(t.pnl_pct for t in losses) / len(losses) * 100 if losses else 0.0
     return dict(
-        n       = len(window),
-        wins    = len(wins),
-        losses  = len(losses),
-        wr      = len(wins) / len(window) * 100,
-        pnl     = sum(t.pnl for t in window),
-        avg_win = sum(t.pnl_pct for t in wins)   / len(wins)   * 100 if wins   else 0.0,
-        avg_loss= sum(t.pnl_pct for t in losses) / len(losses) * 100 if losses else 0.0,
-        pf      = pf,
+        n           = len(window),
+        wins        = len(wins),
+        losses      = len(losses),
+        wr          = len(wins) / len(window) * 100,
+        pnl         = sum(t.pnl for t in window),
+        avg_win_usd = avg_win_usd,
+        avg_loss_usd= avg_loss_usd,
+        avg_win_pct = avg_win_pct,
+        avg_loss_pct= avg_loss_pct,
+        pf          = pf,
     )
 
 
@@ -139,22 +148,23 @@ def _stats(trades: List[ClosedTrade], days: int) -> dict:
 
 def print_report(trades: List[ClosedTrade]) -> None:
     today = date.today().isoformat()
-    print(f"\n{'='*68}")
-    print(f"  Win-Rate Report  —  {today}  ({len(trades)} total closed trades)")
-    print(f"{'='*68}")
-    header = f"  {'Window':<12} {'Trades':>7} {'Wins':>5} {'Losses':>7} {'WR':>7} {'P&L':>10} {'AvgW':>7} {'AvgL':>7} {'PF':>6}"
-    print(header)
-    print(f"  {'-'*64}")
+    print(f"\n{'='*80}")
+    print(f"  Win-Rate Report  --  {today}  ({len(trades)} total closed trades)")
+    print(f"{'='*80}")
+    print(f"  {'Window':<12} {'Trades':>7} {'WR':>7} {'P&L':>10} {'AvgW$':>8} {'AvgL$':>8} {'AvgW%':>7} {'AvgL%':>7} {'PF':>6}")
+    print(f"  {'-'*76}")
     for label, days in _WINDOWS:
         s = _stats(trades, days)
-        wr_str  = f"{s['wr']:.1f}%"  if s['wr']  is not None else "  n/a"
-        pf_str  = f"{s['pf']:.2f}x" if s['pf']  is not None else "   n/a"
+        wr_str  = f"{s['wr']:.1f}%"  if s['wr']  is not None else "   n/a"
+        pf_str  = f"{s['pf']:.2f}x"  if s['pf']  is not None else "   n/a"
         pnl_str = f"${s['pnl']:+.2f}"
         print(
-            f"  {label:<12} {s['n']:>7} {s['wins']:>5} {s['losses']:>7} "
-            f"{wr_str:>7} {pnl_str:>10} {s['avg_win']:>+6.2f}% {s['avg_loss']:>+6.2f}% {pf_str:>6}"
+            f"  {label:<12} {s['n']:>7} {wr_str:>7} {pnl_str:>10} "
+            f"{s['avg_win_usd']:>+8.2f} {s['avg_loss_usd']:>+8.2f} "
+            f"{s['avg_win_pct']:>+6.2f}% {s['avg_loss_pct']:>+6.2f}% {pf_str:>6}"
         )
-    print(f"{'='*68}\n")
+    print(f"  {'Note: AvgW$/AvgL$ = dollar P&L per trade (position-size-weighted)'}")
+    print(f"{'='*80}\n")
 
     # Top / bottom 5 symbols (all-time)
     by_sym: dict = defaultdict(lambda: [0, 0, 0.0])
@@ -196,14 +206,14 @@ def post_discord(trades: List[ClosedTrade]) -> None:
         if s["n"] == 0:
             value = "`no trades`"
         else:
-            wr_icon = "🟢" if (s["wr"] or 0) >= 50 else "🔴"
+            wr_icon  = "🟢" if (s["wr"] or 0) >= 50 else "🔴"
             pnl_icon = "▲" if s["pnl"] >= 0 else "▼"
             value = (
                 f"{wr_icon} **{s['wr']:.1f}%** WR  "
                 f"({s['wins']}W / {s['losses']}L)\n"
-                f"{pnl_icon} P&L `{s['pnl']:+.2f}`  "
-                f"AvgW `{s['avg_win']:+.2f}%`  "
-                f"AvgL `{s['avg_loss']:+.2f}%`"
+                f"{pnl_icon} Net `{s['pnl']:+.2f}`  "
+                f"AvgW `${s['avg_win_usd']:+.2f}` (`{s['avg_win_pct']:+.2f}%`)  "
+                f"AvgL `${s['avg_loss_usd']:+.2f}` (`{s['avg_loss_pct']:+.2f}%`)"
             )
         fields.append({"name": f"📅 {label}", "value": value, "inline": False})
 
