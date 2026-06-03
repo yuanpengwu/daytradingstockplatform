@@ -125,8 +125,9 @@ class Trader:
         atr: Optional[float],
         regime_params: Optional[dict] = None,
     ) -> None:
-        side = "buy" if dec.score > 0 else "sell"
-        price = self.broker.get_last_price(dec.symbol)
+        side   = "buy" if dec.score > 0 else "sell"
+        is_buy = side == "buy"
+        price  = self.broker.get_last_price(dec.symbol)
         if price <= 0:
             log.warning("Skipping %s — no price.", dec.symbol)
             return
@@ -494,6 +495,9 @@ class Trader:
                 # Any profitable exit (including partial-assisted rides) resets streak.
                 self._symbol_daily_losses[position.symbol] = 0
 
+            # ── Capture hold duration before cleanup ───────────────────────
+            held_since = self._entry_time.get(position.symbol)
+
             # ── Clean up per-symbol state ──────────────────────────────────
             self._trail_high.pop(position.symbol, None)
             self._stops.pop(position.symbol, None)
@@ -511,7 +515,7 @@ class Trader:
                 reason=reason,
                 entry_price=position.avg_entry_price,
                 exit_price=exit_price,
-                held_since=self._entry_time.get(position.symbol),
+                held_since=held_since,
                 channels=self.notify_channels,
             )
             if self.trade_history is not None:
