@@ -144,7 +144,21 @@ def main() -> None:
     # ── Stop engine ───────────────────────────────────────────────────────────
     log.info("Market closed — stopping engine via stop_bot.ps1 …")
     _run_ps("stop_bot.ps1")
-    log.info("Engine stopped. market_runner done.")
+    log.info("Engine stopped.")
+
+    # ── EOD win-rate report → Discord ─────────────────────────────────────────
+    log.info("Generating EOD win-rate report …")
+    try:
+        import subprocess as _sp
+        _sp.run(
+            [sys.executable, str(ROOT / "scripts" / "win_rate_report.py"), "--discord"],
+            cwd=str(ROOT),
+            timeout=60,
+        )
+    except Exception as _e:
+        log.warning("Win-rate report failed: %s", _e)
+
+    log.info("market_runner done.")
 
 
 if __name__ == "__main__":
