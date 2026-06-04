@@ -1,8 +1,8 @@
 """24/7 Crypto trading engine.
 
 Runs alongside the main stock TradingEngine in a background thread.
-Uses the same Alpaca broker account, same signal stack (technical + ML),
-but with crypto-specific risk parameters and no market-hours gate.
+Uses the same Alpaca broker account but its OWN dedicated ML model
+trained exclusively on crypto bars — completely separate from the stock ML.
 
 Crypto differences vs stocks
 ─────────────────────────────
@@ -12,11 +12,15 @@ Crypto differences vs stocks
   • GTC time-in-force (DAY is invalid for crypto)
   • No PDT restriction
   • No regime detection (crypto doesn't correlate to NYSE schedule)
+  • Dedicated LightGBM model: models/crypto_lgbm.pkl
+      - Trained on BTC/ETH/SOL/AVAX/LINK bars (never mixed with stock data)
+      - Retrained daily with fresh crypto bars
+      - 30-min prediction horizon (shorter than stocks — crypto moves faster)
 """
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Dict, List, Optional
 
 from .brokers.base import BrokerBase, Order, OrderSide, OrderType, Position, is_crypto_symbol
@@ -31,11 +35,16 @@ log = get_logger(__name__)
 
 
 class CryptoEngine:
-    """Lightweight 24/7 crypto trading loop.
+    """Lightweight 24/7 crypto trading loop with a dedicated crypto ML model.
 
-    Polls every *poll_seconds* (default 60), evaluates technical + ML signals
-    for each configured crypto pair, and places notional market orders when
-    conviction is high enough.
+    Polls every *poll_seconds* (default 60), evaluates technical + crypto-ML
+    signals for each configured crypto pair, and places notional market orders
+    when conviction is high enough.
+
+    Two separate ML models
+    ──────────────────────
+      models/local_lgbm.pkl   — trained on stock bars  (TradingEngine)
+      models/crypto_lgbm.pkl  — trained on crypto bars (CryptoEngine)
 
     Position management:
       • Trailing stop at *trailing_stop_pct* (default 4 %)
@@ -51,7 +60,7 @@ class CryptoEngine:
         self.poll_seconds: int     = int(ccfg.get("poll_seconds", 60))
         self.enabled: bool         = bool(ccfg.get("enabled", True))
 
-        # Market data (reuses existing MarketData with crypto routing)
+        # Market data — crypto routing handled in MarketData
         d = config.get("data", {})
         self.market = MarketData(
             provider=d.get("provider", "alpaca"),
@@ -66,36 +75,44 @@ class CryptoEngine:
         self._stop_pct:       float = float(ccfg.get("per_trade_stop_loss_pct", 0.05))
         self._tp_pct:         float = float(ccfg.get("take_profit_pct", 0.10))
         self._trail_pct:      float = float(ccfg.get("trailing_stop_pct", 0.04))
-        self._min_conf:       float = float(ccfg.get("min_confidence", 0.30))
+        self._min_conf:       float = float(ccfg.get("min_confidence", 0.45))
         self._entry_thresh:   float = float(ccfg.get("enter_long_threshold", 0.35))
         self._tech_gate:      float = float(ccfg.get("tech_score_gate", 0.05))
         self._min_adx:        float = float(ccfg.get("min_entry_adx", 20))
 
-        # Signals — technical primary, ML secondary
-        # Note: the ML model was trained on stocks → low confidence on crypto is
-        # expected and normal.  We use a technical-heavy weighting (80/20) and
-        # a lower min_confidence gate so the technical signal can still trigger
-        # entries when the market is genuinely trending.
+        # ── Technical signal (shared indicator set, works on any OHLCV) ───────
         sig_cfg = config.get("signals", {})
         tech_cfg = sig_cfg.get("technical", {})
         self._tech = TechnicalSignal(tech_cfg)
 
-        ml_cfg = sig_cfg.get("ml", {})
-        self._ml = MLSignal(ml_cfg)
+        # ── Dedicated crypto ML model ──────────────────────────────────────────
+        # Uses crypto.ml config — separate model_path from the stock ML model.
+        # Trained at engine startup (and daily thereafter) on crypto bars only.
+        crypto_ml_cfg = dict(ccfg.get("ml", {}))
+        # Fallback defaults so the model works even without explicit crypto.ml config
+        crypto_ml_cfg.setdefault("mode", "local")
+        crypto_ml_cfg.setdefault("model_path", "models/crypto_lgbm.pkl")
+        crypto_ml_cfg.setdefault("retrain_days", 1)
+        crypto_ml_cfg.setdefault("prediction_horizon_minutes", 30)
+        crypto_ml_cfg.setdefault("label_method", "fixed")
+        crypto_ml_cfg.setdefault("min_confidence", self._min_conf)
+        crypto_ml_cfg.setdefault("tech_threshold", 0.05)
+        self._ml = MLSignal(crypto_ml_cfg)
+        self._ml_last_trained: Optional[date] = None
 
-        # Aggregator — technical-heavy for crypto (ML less reliable on non-stock data)
+        # Equal weights — crypto ML is trained on its own data so it's reliable
         self._agg = SignalAggregator(
-            weights={"technical": 0.80, "ml": 0.20},
+            weights={"technical": 0.50, "ml": 0.50},
             enter_long=self._entry_thresh,
             enter_short=-self._entry_thresh,
             min_confidence=self._min_conf,
         )
 
         # Per-position tracking
-        self._trail_high: Dict[str, float] = {}
-        self._stops:      Dict[str, tuple] = {}   # (stop_price, tp_price)
-        self._entry_time: Dict[str, datetime] = {}
-        self._entry_price: Dict[str, float] = {}
+        self._trail_high:  Dict[str, float]    = {}
+        self._stops:       Dict[str, tuple]    = {}
+        self._entry_time:  Dict[str, datetime] = {}
+        self._entry_price: Dict[str, float]    = {}
 
         # Notification channels
         notif_cfg = config.get("notifications", {})
@@ -103,10 +120,42 @@ class CryptoEngine:
 
         log.info(
             "CryptoEngine initialised | tickers=%s | notional=$%.0f | "
-            "stop=%.0f%% tp=%.0f%% trail=%.0f%%",
+            "stop=%.0f%% tp=%.0f%% trail=%.0f%% | ml_model=%s",
             self.tickers, self._max_notional,
             self._stop_pct * 100, self._tp_pct * 100, self._trail_pct * 100,
+            crypto_ml_cfg["model_path"],
         )
+
+    # ── ML training ───────────────────────────────────────────────────────────
+
+    def _train_crypto_ml(self) -> None:
+        """Fetch crypto bars and train the dedicated crypto LightGBM model.
+
+        Called once at startup and then every day thereafter.
+        Bars for ALL configured crypto tickers are pooled so the model learns
+        patterns shared across BTC, ETH, SOL, AVAX, and LINK.
+        """
+        log.info("CryptoEngine: training crypto ML model on %d pairs …", len(self.tickers))
+        bars_by_sym = {}
+        for sym in self.tickers:
+            try:
+                df = self.market.get_bars(sym, force_refresh=True)
+                if df is not None and not df.empty:
+                    bars_by_sym[sym] = df
+                    log.info("  %s: %d bars", sym, len(df))
+            except Exception as e:
+                log.warning("  %s: fetch failed — %s", sym, e)
+
+        if not bars_by_sym:
+            log.warning("CryptoEngine: no crypto bars fetched — skipping ML training.")
+            return
+
+        ok = self._ml.train(bars_by_sym)
+        if ok:
+            self._ml_last_trained = date.today()
+            log.info("CryptoEngine: crypto ML model trained successfully.")
+        else:
+            log.warning("CryptoEngine: crypto ML training failed.")
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -114,9 +163,18 @@ class CryptoEngine:
         if not self.enabled:
             log.info("CryptoEngine disabled in config — exiting.")
             return
+
+        # Train crypto ML model at startup (before first cycle)
+        self._train_crypto_ml()
+
         log.info("CryptoEngine started (24/7) | pairs=%s", self.tickers)
         while True:
             try:
+                # Retrain daily at midnight UTC
+                today = date.today()
+                if self._ml_last_trained != today:
+                    self._train_crypto_ml()
+
                 self._cycle()
             except Exception as e:
                 log.error("CryptoEngine cycle error: %s", e, exc_info=True)
