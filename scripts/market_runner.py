@@ -203,20 +203,8 @@ def main() -> None:
     )
     log.info("Engine started (PID %d).", engine_proc.pid)
 
-    # ── Step 4: Open a visible status-monitor terminal window ─────────────────
-    # Windows Terminal / PowerShell window shows engine_status.py live.
-    # The window stays open until the engine stops at 4:05 PM ET.
-    monitor_cmd = (
-        f'"{PYTHON}" "{ROOT / "scripts" / "engine_status.py"}"'
-    )
-    log.info("Opening live status monitor …")
-    subprocess.Popen(
-        [
-            "powershell", "-NoExit", "-Command",
-            f"$host.ui.RawUI.WindowTitle = 'DayTradingBot Monitor'; {monitor_cmd}",
-        ],
-        creationflags=subprocess.CREATE_NEW_CONSOLE,
-    )
+    # Note: the status monitor is opened automatically by main.py on startup.
+    # No need to open it here — main.py always does it regardless of launch path.
 
     # ── Step 5: Wait until 4:05 PM ET then stop ───────────────────────────────
     now = et_now()

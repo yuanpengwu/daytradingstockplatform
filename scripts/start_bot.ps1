@@ -29,11 +29,6 @@ $engineWindow = Start-Process -FilePath $python `
 
 Write-Host "Engine started (PID $($engineWindow.Id))"
 
-# ── Open the live status monitor in a new terminal window ─────────────────────
-# Gives it a title so it's easy to find in the taskbar.
-Start-Process -FilePath "powershell" `
-    -ArgumentList "-NoExit", "-Command", `
-        "`$host.ui.RawUI.WindowTitle = 'DayTradingBot Monitor'; & '$python' '$projectDir\scripts\engine_status.py'" `
-    -WindowStyle Normal
-
-Write-Host "Status monitor opened. Engine PID: $($engineWindow.Id)"
+# Note: main.py opens the status monitor automatically on startup.
+# No need to open it here.
+Write-Host "Engine started. Status monitor will open automatically. PID: $($engineWindow.Id)"

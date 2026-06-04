@@ -14,6 +14,7 @@ Starts two engines in parallel:
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -25,6 +26,43 @@ from src.engine import TradingEngine
 from src.crypto_engine import CryptoEngine
 from src.brokers import get_broker
 from src.utils.logger import get_logger
+
+_ROOT = Path(__file__).resolve().parent
+
+
+def _open_status_monitor() -> None:
+    """Open a visible terminal window running the live status monitor.
+
+    Called once at startup regardless of how main.py was launched
+    (Task Scheduler, start_bot.ps1, or manual command line).
+    The window is titled 'DayTradingBot Monitor' so it's easy to find.
+    If a monitor window is already open it just opens a second one —
+    harmless, the user can close the extra.
+    """
+    import platform
+    if platform.system() != "Windows":
+        return   # Linux / macOS: skip (run engine_status.py manually)
+
+    monitor_script = _ROOT / "scripts" / "engine_status.py"
+    if not monitor_script.exists():
+        return
+
+    try:
+        subprocess.Popen(
+            [
+                "powershell",
+                "-NoExit",
+                "-Command",
+                (
+                    f"$host.ui.RawUI.WindowTitle = 'DayTradingBot Monitor'; "
+                    f"& '{sys.executable}' '{monitor_script}'"
+                ),
+            ],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+    except Exception as e:
+        # Non-fatal — monitor is cosmetic, don't block the engine
+        print(f"[warn] Could not open status monitor: {e}", file=sys.stderr)
 
 
 def load_config(path: Path) -> dict:
@@ -49,6 +87,10 @@ def main():
 
     load_dotenv()
     log = get_logger("main")
+
+    # Always open the live status monitor in a separate terminal window,
+    # regardless of how this script was launched.
+    _open_status_monitor()
 
     cfg_path = Path(args.config)
     cfg = load_config(cfg_path)
