@@ -170,8 +170,12 @@ crypto:
   per_trade_stop_loss_pct: 0.05   # 5% stop loss (wider than stocks)
   take_profit_pct: 0.10            # 10% take profit
   trailing_stop_pct: 0.04          # 4% trailing stop
-  min_confidence: 0.55
-  enter_long_threshold: 0.40
+  # Signal thresholds — lower than stocks because:
+  #   1. ML model was trained on stocks → lower crypto confidence is expected
+  #   2. Crypto moves faster, so we rely more on technical signal alone
+  min_confidence: 0.30             # was 0.55 — ML tops out at ~0.45 on crypto
+  enter_long_threshold: 0.35       # was 0.40 — technical-only signal peaks at 0.60
+  tech_score_gate: 0.05            # min abs(tech_score) to proceed (unchanged)
   min_entry_adx: 20               # only trade when ADX > 20 (trending)
 
 notifications:

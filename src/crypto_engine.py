@@ -66,11 +66,16 @@ class CryptoEngine:
         self._stop_pct:       float = float(ccfg.get("per_trade_stop_loss_pct", 0.05))
         self._tp_pct:         float = float(ccfg.get("take_profit_pct", 0.10))
         self._trail_pct:      float = float(ccfg.get("trailing_stop_pct", 0.04))
-        self._min_conf:       float = float(ccfg.get("min_confidence", 0.55))
-        self._entry_thresh:   float = float(ccfg.get("enter_long_threshold", 0.40))
+        self._min_conf:       float = float(ccfg.get("min_confidence", 0.30))
+        self._entry_thresh:   float = float(ccfg.get("enter_long_threshold", 0.35))
+        self._tech_gate:      float = float(ccfg.get("tech_score_gate", 0.05))
         self._min_adx:        float = float(ccfg.get("min_entry_adx", 20))
 
-        # Signals — technical + ML (same engines as stocks)
+        # Signals — technical primary, ML secondary
+        # Note: the ML model was trained on stocks → low confidence on crypto is
+        # expected and normal.  We use a technical-heavy weighting (80/20) and
+        # a lower min_confidence gate so the technical signal can still trigger
+        # entries when the market is genuinely trending.
         sig_cfg = config.get("signals", {})
         tech_cfg = sig_cfg.get("technical", {})
         self._tech = TechnicalSignal(tech_cfg)
@@ -78,9 +83,9 @@ class CryptoEngine:
         ml_cfg = sig_cfg.get("ml", {})
         self._ml = MLSignal(ml_cfg)
 
-        # Aggregator — equal weights for crypto (no finrl/sentiment/orb)
+        # Aggregator — technical-heavy for crypto (ML less reliable on non-stock data)
         self._agg = SignalAggregator(
-            weights={"technical": 0.60, "ml": 0.40},
+            weights={"technical": 0.80, "ml": 0.20},
             enter_long=self._entry_thresh,
             enter_short=-self._entry_thresh,
             min_confidence=self._min_conf,
@@ -155,7 +160,7 @@ class CryptoEngine:
     def _evaluate_entry(self, sym: str, bars, equity: float) -> None:
         try:
             tech_sig = self._tech.evaluate(sym, bars)
-            if tech_sig is None or abs(tech_sig.score) < 0.05:
+            if tech_sig is None or abs(tech_sig.score) < self._tech_gate:
                 return  # weak technical signal
 
             ml_sig = self._ml.evaluate(sym, bars, tech_signal=tech_sig)
