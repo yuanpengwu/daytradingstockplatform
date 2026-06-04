@@ -279,7 +279,16 @@ class DynamicUniverse:
                 return picks
             log.warning("Gemini sector prediction returned no valid tickers.")
         except Exception as exc:
-            log.warning("Gemini sector prediction failed: %s", exc)
+            err_str = str(exc)
+            if "RESOURCE_EXHAUSTED" in err_str or "credits" in err_str.lower():
+                log.warning(
+                    "Gemini sector prediction skipped — prepaid credits depleted. "
+                    "Top up at https://aistudio.google.com or set gemini_sector_call: false in config.yaml"
+                )
+            elif "RATE_LIMIT" in err_str or "429" in err_str:
+                log.debug("Gemini rate-limited — will retry next cycle.")
+            else:
+                log.warning("Gemini sector prediction failed: %s", exc)
 
         return []
 

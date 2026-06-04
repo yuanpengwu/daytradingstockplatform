@@ -7,7 +7,7 @@ universe:
   max_tickers: 10
   max_sectors: 2
   method: sector_intelligence
-  gemini_sector_call: true
+  gemini_sector_call: false   # disabled — prepaid credits depleted; re-enable after topping up at aistudio.google.com
   stock_rank_by: volume_atr
   fallback_tickers:
   - AAPL
