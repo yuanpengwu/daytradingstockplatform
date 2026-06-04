@@ -175,10 +175,28 @@ class TradingEngine:
 
     # ---------- main loop ----------
     def run_forever(self) -> None:
+        # Log the exact git commit so we always know which version is running.
+        try:
+            import subprocess as _sp
+            _git = _sp.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            _commit = _git.stdout.strip() if _git.returncode == 0 else "unknown"
+            _msg = _sp.run(
+                ["git", "log", "-1", "--format=%s"],
+                capture_output=True, text=True, timeout=5,
+            )
+            _subject = _msg.stdout.strip() if _msg.returncode == 0 else ""
+        except Exception:
+            _commit, _subject = "unknown", ""
+
         log.info(
-            "Engine starting | broker=%s | tickers=%s",
+            "Engine starting | broker=%s | tickers=%s | commit=%s (%s)",
             self.config["broker"]["name"],
             ",".join(self.tickers),
+            _commit,
+            _subject[:60],
         )
         try:
             while True:

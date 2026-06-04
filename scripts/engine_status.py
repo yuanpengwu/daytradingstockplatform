@@ -78,7 +78,7 @@ def get_engine_pid() -> tuple[int | None, str]:
             parts = line.strip().split(",")
             if len(parts) >= 3 and parts[2].strip().isdigit():
                 pid = int(parts[2].strip())
-                raw_dt = parts[1].strip()  # e.g. 20260603080828.000000+000
+                raw_dt = parts[1].strip()
                 try:
                     dt = datetime.strptime(raw_dt[:14], "%Y%m%d%H%M%S")
                     dt = dt.replace(tzinfo=timezone.utc)
@@ -92,6 +92,29 @@ def get_engine_pid() -> tuple[int | None, str]:
     except Exception:
         pass
     return None, ""
+
+
+def get_git_info() -> tuple[str, str]:
+    """Return (running_commit, latest_commit) — flags stale code."""
+    try:
+        # Commit the engine process started on (from log)
+        log_path = ROOT / "logs" / "bot.log"
+        running = "unknown"
+        if log_path.exists():
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in reversed(lines):
+                if "Engine starting" in line and "commit=" in line:
+                    m = re.search(r"commit=([a-f0-9]+)", line)
+                    if m:
+                        running = m.group(1)
+                    break
+        # Latest commit in repo
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                           cwd=ROOT, capture_output=True, text=True, timeout=5)
+        latest = r.stdout.strip() if r.returncode == 0 else "unknown"
+        return running, latest
+    except Exception:
+        return "unknown", "unknown"
 
 
 def get_market_status() -> tuple[str, str]:
@@ -214,11 +237,12 @@ def get_recent_log_events(n: int = 8) -> list[str]:
 # ── Render ─────────────────────────────────────────────────────────────────────
 
 def render():
-    pid, uptime   = get_engine_pid()
-    mkt_status, et_time = get_market_status()
+    pid, uptime          = get_engine_pid()
+    running_commit, latest_commit = get_git_info()
+    mkt_status, et_time  = get_market_status()
     positions, equity, cash = get_positions()
-    today_trades  = get_today_trades()
-    log_events    = get_recent_log_events(8)
+    today_trades         = get_today_trades()
+    log_events           = get_recent_log_events(8)
 
     lines = []
     lines.append(box_top())
@@ -226,13 +250,16 @@ def render():
     # Header
     is_open = mkt_status == "OPEN"
     mkt_col = green(mkt_status) if is_open else yellow(mkt_status)
-    header = f"{bold('DayTradingBot')}  │  {et_time}  │  Market {mkt_col}"
+    header = f"{bold('DayTradingBot')}  |  {et_time}  |  Market {mkt_col}"
     lines.append(box_row(header))
     lines.append(box_sep())
 
-    # Engine status
+    # Engine status + version
+    stale = running_commit != latest_commit and running_commit != "unknown"
     if pid:
-        eng = f"{green('● RUNNING')}  PID {pid}  Uptime {uptime}"
+        ver = (yellow(f"commit {running_commit} [STALE — latest={latest_commit}]")
+               if stale else green(f"commit {running_commit}"))
+        eng = f"{green('● RUNNING')}  PID {pid}  Uptime {uptime}  {ver}"
     else:
         eng = f"{red('● STOPPED')}  — run: python main.py --broker alpaca"
     lines.append(box_row(bold("ENGINE ") + eng))

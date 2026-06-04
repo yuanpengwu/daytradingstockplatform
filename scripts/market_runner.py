@@ -115,6 +115,63 @@ def _run_ps(script_name: str) -> None:
         log.warning("PS %s stderr: %s", script_name, result.stderr.strip())
 
 
+def _git_pull_latest() -> str:
+    """Pull latest code from origin and return the new commit hash."""
+    log.info("Pulling latest code from git …")
+    try:
+        # Fetch + reset to origin/main — guarantees we run exactly what's in git
+        subprocess.run(["git", "fetch", "origin"], cwd=ROOT, timeout=30, check=True)
+        subprocess.run(
+            ["git", "reset", "--hard", "origin/main"],
+            cwd=ROOT, timeout=30, check=True,
+        )
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%h %s"],
+            cwd=ROOT, capture_output=True, text=True, timeout=10,
+        )
+        commit_line = result.stdout.strip()
+        log.info("Now running commit: %s", commit_line)
+        return commit_line
+    except Exception as e:
+        log.warning("git pull failed (%s) — continuing with current code.", e)
+        return "unknown"
+
+
+def _clear_pycache() -> None:
+    """Delete all __pycache__ dirs so Python re-compiles from the pulled .py files."""
+    count = 0
+    for cache_dir in ROOT.rglob("__pycache__"):
+        try:
+            import shutil
+            shutil.rmtree(cache_dir)
+            count += 1
+        except Exception:
+            pass
+    log.info("Cleared %d __pycache__ directories.", count)
+
+
+def _kill_old_engine() -> None:
+    """Kill any stale main.py processes from a previous session."""
+    try:
+        result = subprocess.run(
+            ["wmic", "process", "where", "CommandLine like '%main.py%'",
+             "get", "ProcessId", "/format:csv"],
+            capture_output=True, text=True, timeout=10,
+        )
+        killed = 0
+        for line in result.stdout.strip().splitlines():
+            parts = line.strip().split(",")
+            if len(parts) >= 2 and parts[-1].strip().isdigit():
+                pid = int(parts[-1].strip())
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                               capture_output=True, timeout=5)
+                killed += 1
+        if killed:
+            log.info("Killed %d stale engine process(es).", killed)
+    except Exception as e:
+        log.debug("Kill-old-engine: %s", e)
+
+
 def main() -> None:
     today_et = et_now().date()
     log.info("market_runner started — checking %s", today_et)
@@ -123,10 +180,19 @@ def main() -> None:
         log.info("Not a trading day (%s) — exiting.", today_et)
         return
 
-    # ── Wait until 9:25 AM ET (5 min before open, engine startup buffer) ────
-    _wait_until(9, 25)
+    # ── Wait until 9:20 AM ET (engine startup + model training buffer) ────────
+    _wait_until(9, 20)
 
-    # ── Start engine ─────────────────────────────────────────────────────────
+    # ── Step 1: Kill any stale engine from a previous session ─────────────────
+    _kill_old_engine()
+    time.sleep(2)
+
+    # ── Step 2: Pull latest code + clear stale bytecode ───────────────────────
+    commit = _git_pull_latest()
+    _clear_pycache()
+    log.info("Code ready. Commit: %s", commit)
+
+    # ── Step 3: Start engine ───────────────────────────────────────────────────
     log.info("Starting engine via start_bot.ps1 …")
     _run_ps("start_bot.ps1")
     log.info("Engine start command issued.")
