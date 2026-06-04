@@ -192,12 +192,33 @@ def main() -> None:
     _clear_pycache()
     log.info("Code ready. Commit: %s", commit)
 
-    # ── Step 3: Start engine ───────────────────────────────────────────────────
-    log.info("Starting engine via start_bot.ps1 …")
-    _run_ps("start_bot.ps1")
-    log.info("Engine start command issued.")
+    # ── Step 3: Start engine (foreground process, output to log files) ────────
+    log.info("Starting engine …")
+    PYTHON = sys.executable
+    engine_proc = subprocess.Popen(
+        [PYTHON, str(ROOT / "main.py"), "--broker", "alpaca"],
+        cwd=str(ROOT),
+        stdout=open(ROOT / "logs" / "bot_stdout.log", "a"),
+        stderr=open(ROOT / "logs" / "bot_err.log", "a"),
+    )
+    log.info("Engine started (PID %d).", engine_proc.pid)
 
-    # ── Wait until 4:05 PM ET (5 min after close) ───────────────────────────
+    # ── Step 4: Open a visible status-monitor terminal window ─────────────────
+    # Windows Terminal / PowerShell window shows engine_status.py live.
+    # The window stays open until the engine stops at 4:05 PM ET.
+    monitor_cmd = (
+        f'"{PYTHON}" "{ROOT / "scripts" / "engine_status.py"}"'
+    )
+    log.info("Opening live status monitor …")
+    subprocess.Popen(
+        [
+            "powershell", "-NoExit", "-Command",
+            f"$host.ui.RawUI.WindowTitle = 'DayTradingBot Monitor'; {monitor_cmd}",
+        ],
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+    )
+
+    # ── Step 5: Wait until 4:05 PM ET then stop ───────────────────────────────
     now = et_now()
     close = now.replace(hour=16, minute=5, second=0, microsecond=0)
     if close <= now:
@@ -205,11 +226,20 @@ def main() -> None:
     else:
         wait_secs = (close - now).total_seconds()
         log.info("Engine will run for %.1f hours (until 4:05 PM ET).", wait_secs / 3600)
-        time.sleep(wait_secs)
+        # Poll every minute so we can detect early crash
+        while et_now() < close:
+            if engine_proc.poll() is not None:
+                log.warning("Engine process exited early (code %d)!", engine_proc.returncode)
+                break
+            time.sleep(60)
 
-    # ── Stop engine ───────────────────────────────────────────────────────────
-    log.info("Market closed — stopping engine via stop_bot.ps1 …")
-    _run_ps("stop_bot.ps1")
+    # ── Step 6: Stop engine ────────────────────────────────────────────────────
+    log.info("Market closed — stopping engine (PID %d) …", engine_proc.pid)
+    engine_proc.terminate()
+    try:
+        engine_proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        engine_proc.kill()
     log.info("Engine stopped.")
 
     # ── EOD win-rate report → Discord ─────────────────────────────────────────
