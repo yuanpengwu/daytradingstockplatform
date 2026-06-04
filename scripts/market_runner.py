@@ -116,24 +116,22 @@ def _run_ps(script_name: str) -> None:
 
 
 def _git_pull_latest() -> str:
-    """Pull latest code from origin and return the new commit hash."""
-    log.info("Pulling latest code from git …")
+    """Log the current git commit (do NOT reset — local commits may be ahead of origin).
+
+    We previously did `git reset --hard origin/main` which wiped unpushed
+    local commits.  Now we just report the HEAD commit so we can verify
+    which code is running without destroying anything.
+    """
     try:
-        # Fetch + reset to origin/main — guarantees we run exactly what's in git
-        subprocess.run(["git", "fetch", "origin"], cwd=ROOT, timeout=30, check=True)
-        subprocess.run(
-            ["git", "reset", "--hard", "origin/main"],
-            cwd=ROOT, timeout=30, check=True,
-        )
         result = subprocess.run(
             ["git", "log", "-1", "--format=%h %s"],
             cwd=ROOT, capture_output=True, text=True, timeout=10,
         )
         commit_line = result.stdout.strip()
-        log.info("Now running commit: %s", commit_line)
+        log.info("Running commit: %s", commit_line)
         return commit_line
     except Exception as e:
-        log.warning("git pull failed (%s) — continuing with current code.", e)
+        log.warning("git log failed (%s).", e)
         return "unknown"
 
 
