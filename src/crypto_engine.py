@@ -156,16 +156,19 @@ class CryptoEngine:
         try:
             tech_sig = self._tech.evaluate(sym, bars)
             if tech_sig is None or abs(tech_sig.score) < 0.05:
-                return  # weak technical signal — don't waste ML call
+                return  # weak technical signal
 
             ml_sig = self._ml.evaluate(sym, bars, tech_signal=tech_sig)
 
-            signals = {s.source.value: s for s in [tech_sig, ml_sig] if s and s.confidence > 0}
-            if not signals:
+            # aggregate() expects List[Signal] and returns Dict[symbol, AggregatedDecision]
+            signal_list = [s for s in [tech_sig, ml_sig]
+                           if s is not None and hasattr(s, "confidence") and s.confidence > 0]
+            if not signal_list:
                 return
 
-            dec: AggregatedDecision = self._agg.aggregate(signals)
-            if dec.action not in ("BUY",):   # crypto long-only for now
+            decisions = self._agg.aggregate(signal_list)
+            dec = decisions.get(sym)
+            if dec is None or dec.action != "BUY":   # crypto long-only
                 return
 
             price = self.broker.get_last_price(sym)
@@ -180,7 +183,7 @@ class CryptoEngine:
 
             self._place_entry(sym, price, notional, dec)
         except Exception as e:
-            log.warning("CryptoEngine entry eval failed for %s: %s", sym, e)
+            log.warning("CryptoEngine entry eval failed for %s: %s", sym, e, exc_info=True)
 
     def _place_entry(self, sym: str, price: float, notional: float, dec: AggregatedDecision) -> None:
         stop_price = price * (1 - self._stop_pct)
