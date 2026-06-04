@@ -19,20 +19,24 @@ from ..utils.logger import get_logger
 log = get_logger(__name__)
 
 
+def is_crypto_symbol(symbol: str) -> bool:
+    """Return True for crypto tickers like BTC/USD, ETH/USD, BTCUSD."""
+    return "/" in symbol or symbol.upper().endswith("USD") and len(symbol) >= 6
+
+
 class MarketData:
-    """Fetches and caches OHLCV bars per ticker."""
+    """Fetches and caches OHLCV bars per ticker (stocks + crypto)."""
 
     def __init__(self, provider: str = "alpaca", interval: str = "5m", lookback_days: int = 30,
                  feed: str = "iex"):
         self.provider = provider.lower()
         self.interval = interval
         self.lookback_days = lookback_days
-        # Data feed: "iex" for free/paper accounts, "sip" for live accounts
-        # with Algo Trader Plus subscription (full consolidated tape).
         self.feed = feed.lower()
         self._cache: Dict[str, pd.DataFrame] = {}
         self._cache_ts: Dict[str, datetime] = {}
-        self._alpaca_client = None  # lazily created
+        self._alpaca_client = None        # StockHistoricalDataClient (lazily created)
+        self._alpaca_crypto_client = None # CryptoHistoricalDataClient (lazily created)
 
     def get_bars(
         self,
@@ -69,7 +73,9 @@ class MarketData:
         ):
             return self._cache[symbol]
 
-        if self.provider == "alpaca":
+        if self.provider == "alpaca" and is_crypto_symbol(symbol):
+            df = self._fetch_alpaca_crypto(symbol)
+        elif self.provider == "alpaca":
             df = self._fetch_alpaca(symbol)
         elif self.provider == "polygon":
             df = self._fetch_polygon(symbol)
@@ -92,13 +98,74 @@ class MarketData:
         if self._alpaca_client is not None:
             return self._alpaca_client
         from alpaca.data.historical import StockHistoricalDataClient
-
         key = os.getenv("ALPACA_API_KEY")
         secret = os.getenv("ALPACA_API_SECRET")
         if not (key and secret):
             raise RuntimeError("ALPACA_API_KEY / ALPACA_API_SECRET not set in env.")
         self._alpaca_client = StockHistoricalDataClient(key, secret)
         return self._alpaca_client
+
+    def _get_alpaca_crypto_client(self):
+        if self._alpaca_crypto_client is not None:
+            return self._alpaca_crypto_client
+        from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+        key = os.getenv("ALPACA_API_KEY")
+        secret = os.getenv("ALPACA_API_SECRET")
+        if not (key and secret):
+            raise RuntimeError("ALPACA_API_KEY / ALPACA_API_SECRET not set in env.")
+        self._alpaca_crypto_client = CryptoHistoricalDataClient(key, secret)
+        return self._alpaca_crypto_client
+
+    def _fetch_alpaca_crypto(
+        self,
+        symbol: str,
+        start_dt: Optional[datetime] = None,
+        end_dt: Optional[datetime] = None,
+    ) -> Optional[pd.DataFrame]:
+        """Fetch OHLCV bars for a crypto pair (e.g. BTC/USD) from Alpaca.
+
+        Crypto markets are 24/7 so no feed restriction applies.
+        Returns the same [Open, High, Low, Close, Volume] schema as stocks.
+        """
+        try:
+            from alpaca.data.requests import CryptoBarsRequest
+        except ImportError:
+            log.warning("alpaca-py crypto module not available.")
+            return None
+
+        try:
+            client = self._get_alpaca_crypto_client()
+            if end_dt is not None:
+                end = end_dt if end_dt.tzinfo else end_dt.replace(tzinfo=timezone.utc)
+            else:
+                end = datetime.now(timezone.utc)
+            if start_dt is not None:
+                start = start_dt if start_dt.tzinfo else start_dt.replace(tzinfo=timezone.utc)
+            else:
+                start = end - timedelta(days=self.lookback_days)
+
+            req = CryptoBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=self._alpaca_timeframe(),
+                start=start,
+                end=end,
+            )
+            resp = client.get_crypto_bars(req)
+            df = resp.df
+            if df is None or df.empty:
+                log.warning("Alpaca crypto returned no bars for %s.", symbol)
+                return None
+            if isinstance(df.index, pd.MultiIndex):
+                df = df.loc[symbol] if symbol in df.index.get_level_values(0) else df.droplevel(0)
+            df = df.rename(columns={
+                "open": "Open", "high": "High", "low": "Low",
+                "close": "Close", "volume": "Volume",
+            })
+            cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+            return df[cols]
+        except Exception as e:
+            log.warning("Alpaca crypto fetch failed for %s: %s", symbol, e)
+            return None
 
     def _alpaca_timeframe(self):
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit

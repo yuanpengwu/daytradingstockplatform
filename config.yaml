@@ -153,6 +153,27 @@ schedule:
   no_entry_before_close_minutes: 5    # EOD flush at close, not 30 min early
   no_trade_window_start: '11:30'
   no_trade_window_end: '14:00'
+crypto:
+  enabled: true
+  tickers:                         # 24/7 Alpaca crypto pairs
+    - BTC/USD
+    - ETH/USD
+    - SOL/USD
+    - AVAX/USD
+    - LINK/USD
+  bar_interval: 1m
+  lookback_days: 10
+  poll_seconds: 60                 # how often to run the crypto signal cycle
+  # Risk params — crypto is 3-5× more volatile than stocks
+  max_position_notional: 500       # max $ per crypto position (notional order)
+  max_total_exposure_pct: 0.15     # max 15% of portfolio in crypto at once
+  per_trade_stop_loss_pct: 0.05   # 5% stop loss (wider than stocks)
+  take_profit_pct: 0.10            # 10% take profit
+  trailing_stop_pct: 0.04          # 4% trailing stop
+  min_confidence: 0.55
+  enter_long_threshold: 0.40
+  min_entry_adx: 20               # only trade when ADX > 20 (trending)
+
 notifications:
   on_trade: true
   on_kill_switch: true

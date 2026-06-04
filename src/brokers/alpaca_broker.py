@@ -90,8 +90,17 @@ class AlpacaBroker(BrokerBase):
 
         paper = "paper" in base
         self._client = TradingClient(key, secret, paper=paper)
-        self._data = StockHistoricalDataClient(key, secret)
+        self._data   = StockHistoricalDataClient(key, secret)
+        # Crypto data client — lazily initialised when first crypto symbol is seen
+        self._crypto_data = None
+        self._key, self._secret = key, secret
         log.info("AlpacaBroker connected | paper=%s", paper)
+
+    def _get_crypto_data_client(self):
+        if self._crypto_data is None:
+            from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+            self._crypto_data = CryptoHistoricalDataClient(self._key, self._secret)
+        return self._crypto_data
 
     # ---------- account ----------
     def _account(self):
@@ -125,22 +134,35 @@ class AlpacaBroker(BrokerBase):
     def submit_order(self, order: Order) -> Order:
         from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
         from alpaca.trading.enums import OrderSide as AOS, TimeInForce
+        from .base import is_crypto_symbol
 
-        side = AOS.BUY if order.side == OrderSide.BUY else AOS.SELL
+        side   = AOS.BUY if order.side == OrderSide.BUY else AOS.SELL
+        crypto = is_crypto_symbol(order.symbol)
+        # Crypto: GTC time-in-force (DAY is not valid for 24/7 markets)
+        tif    = TimeInForce.GTC if crypto else TimeInForce.DAY
+
         if order.type == OrderType.LIMIT and order.limit_price:
             req = LimitOrderRequest(
                 symbol=order.symbol,
                 qty=order.qty,
                 side=side,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=tif,
                 limit_price=order.limit_price,
+            )
+        elif crypto and order.notional:
+            # Crypto market order sized by dollar notional (e.g. $500 of BTC)
+            req = MarketOrderRequest(
+                symbol=order.symbol,
+                notional=round(order.notional, 2),
+                side=side,
+                time_in_force=tif,
             )
         else:
             req = MarketOrderRequest(
                 symbol=order.symbol,
                 qty=order.qty,
                 side=side,
-                time_in_force=TimeInForce.DAY,
+                time_in_force=tif,
             )
         # NOTE: order submission is intentionally NOT retried — a retry after a
         # dropped connection could place the same order twice. On any failure
@@ -219,8 +241,10 @@ class AlpacaBroker(BrokerBase):
             return False
 
     def get_last_price(self, symbol: str) -> float:
+        from .base import is_crypto_symbol
+        if is_crypto_symbol(symbol):
+            return self._get_crypto_price(symbol)
         from alpaca.data.requests import StockLatestTradeRequest
-
         req = StockLatestTradeRequest(symbol_or_symbols=symbol)
         try:
             trades = _retry(
@@ -230,4 +254,18 @@ class AlpacaBroker(BrokerBase):
             return float(trades[symbol].price)
         except Exception as e:
             log.warning("Alpaca price fetch failed for %s: %s", symbol, e)
+            return 0.0
+
+    def _get_crypto_price(self, symbol: str) -> float:
+        try:
+            from alpaca.data.requests import CryptoLatestTradeRequest
+            client = self._get_crypto_data_client()
+            req    = CryptoLatestTradeRequest(symbol_or_symbols=symbol)
+            trades = _retry(
+                lambda: client.get_crypto_latest_trade(req),
+                f"get_crypto_price({symbol})",
+            )
+            return float(trades[symbol].price)
+        except Exception as e:
+            log.warning("Alpaca crypto price fetch failed for %s: %s", symbol, e)
             return 0.0

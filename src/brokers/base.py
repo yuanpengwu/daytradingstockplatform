@@ -12,6 +12,11 @@ from enum import Enum
 from typing import Dict, List, Optional
 
 
+def is_crypto_symbol(symbol: str) -> bool:
+    """Return True for crypto tickers like BTC/USD, ETH/USD."""
+    return "/" in symbol
+
+
 class OrderSide(str, Enum):
     BUY = "buy"
     SELL = "sell"
@@ -39,6 +44,7 @@ class Order:
     limit_price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    notional: Optional[float] = None       # crypto: order by dollar amount instead of qty
     id: Optional[str] = None
     status: OrderStatus = OrderStatus.PENDING
     filled_qty: float = 0.0
