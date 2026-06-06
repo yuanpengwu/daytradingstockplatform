@@ -226,9 +226,17 @@ class CryptoTrader:
         stop_price = price * (1 + self._stop_pct)
         tp_price   = price * (1 - self._tp_pct)
 
+        # Alpaca only accepts notional for BUY-side crypto orders.
+        # For SELL (short entry) we must supply an explicit fractional qty.
+        qty = round(notional / price, 8)
+        if qty <= 0:
+            log.warning("CryptoTrader: computed zero qty for short %s (notional=%.2f price=%.4f).",
+                        sym, notional, price)
+            return False
+
         order = Order(
             symbol=sym, side=OrderSide.SELL,
-            qty=0.0, notional=notional, type=OrderType.MARKET,
+            qty=qty, notional=None, type=OrderType.MARKET,
         )
         result = self.broker.submit_order(order)
         if result.status.value != "filled":

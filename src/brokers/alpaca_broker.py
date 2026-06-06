@@ -189,8 +189,9 @@ class AlpacaBroker(BrokerBase):
                 time_in_force=tif,
                 limit_price=order.limit_price,
             )
-        elif crypto and order.notional:
-            # Crypto market order sized by dollar notional (e.g. $500 of BTC)
+        elif crypto and order.notional and order.side == OrderSide.BUY:
+            # Alpaca only accepts notional for BUY-side crypto orders.
+            # SELL orders (short entries or exits) must use qty — see below.
             req = MarketOrderRequest(
                 symbol=order.symbol,
                 notional=round(order.notional, 2),
