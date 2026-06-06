@@ -68,16 +68,32 @@ def write_status_page(
             positions_html = "<p class='muted'>No open positions.</p>"
 
         # ----- decisions table -----
+        # decisions can be:
+        #   dict  {sym: AggregatedDecision}  — from a live trading cycle
+        #   list  [{symbol, score, …}]        — pre-serialized (preserved off-hours)
         decisions = decisions or {}
-        if decisions:
+        if isinstance(decisions, list):
+            dec_list = decisions
+        else:
+            dec_list = [
+                {
+                    "symbol":     sym,
+                    "score":      d.score,
+                    "confidence": d.confidence,
+                    "action":     d.action,
+                }
+                for sym, d in decisions.items()
+            ]
+
+        if dec_list:
             drows = ""
-            for sym, d in sorted(decisions.items(), key=lambda kv: -kv[1].score):
-                act = d.action
+            for d in sorted(dec_list, key=lambda x: -x.get("score", 0)):
+                act  = d.get("action", "HOLD")
                 acls = {"BUY": "pos", "SELL": "neg", "HOLD": "muted"}.get(act, "")
                 drows += (
-                    f"<tr><td><b>{_esc(sym)}</b></td>"
-                    f"<td>{d.score:+.3f}</td>"
-                    f"<td>{d.confidence:.2f}</td>"
+                    f"<tr><td><b>{_esc(d.get('symbol','?'))}</b></td>"
+                    f"<td>{d.get('score',0):+.3f}</td>"
+                    f"<td>{d.get('confidence',0):.2f}</td>"
                     f"<td class='{acls}'>{act}</td></tr>"
                 )
             decisions_html = (
@@ -163,7 +179,7 @@ def write_status_page(
                     "unrealized_pnl_pct": p.unrealized_pnl_pct
                 } for sym, p in positions.items()
             ],
-            "decisions": [
+            "decisions": dec_list if isinstance(decisions, list) else [
                 {
                     "symbol":     sym,
                     "score":      d.score,

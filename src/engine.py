@@ -132,7 +132,9 @@ class TradingEngine:
 
         self._last_day_started = None
         self._last_universe_refresh: Optional[datetime] = None
-        self._last_decisions: Dict = {}   # preserved so status page shows last scores off-hours
+        # Serialised decision list preserved across cycles and restarts so the
+        # status page keeps showing last known scores when the market is closed.
+        self._last_decisions: list = self._load_cached_decisions()
         # How often to run the intraday sector re-score during market hours.
         # Read from universe.universe_refresh_hours (not schedule.*) so it lives
         # next to the other universe config rather than being buried in schedule.
@@ -178,6 +180,39 @@ class TradingEngine:
         rcfg = config.get("risk", {})
         self._use_next_day_cooloff: bool = bool(rcfg.get("next_day_cooloff", True))
         self._cooloff_until: Dict[str, object] = {}   # sym → date
+
+    # ---------- decision cache helpers ----------
+
+    def _load_cached_decisions(self) -> list:
+        """Seed _last_decisions from status.json so a restart doesn't clear scores."""
+        try:
+            import json
+            p = _PROJECT_ROOT / "status.json"
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                cached = data.get("decisions", [])
+                if cached:
+                    log.info("Engine: loaded %d cached decisions from status.json.", len(cached))
+                    return cached
+        except Exception:
+            pass
+        return []
+
+    def _serialise_decisions(self, decisions: dict) -> list:
+        """Convert {sym: AggregatedDecision} → list of dicts for JSON/status page."""
+        out = []
+        for sym, d in decisions.items():
+            out.append({
+                "symbol":     sym,
+                "score":      d.score,
+                "confidence": d.confidence,
+                "action":     d.action,
+                "components": {k: round(v, 4) for k, v in d.components.items()}
+                              if hasattr(d, "components") else {},
+                "raw_scores": {k: round(v, 4) for k, v in d.raw_scores.items()}
+                              if hasattr(d, "raw_scores") else {},
+            })
+        return out
 
     # ---------- main loop ----------
     def run_forever(self) -> None:
@@ -493,11 +528,11 @@ class TradingEngine:
         # 5. Write the live status page (never let this break the loop).
         self._cycle_count += 1
         if decisions:
-            self._last_decisions = decisions   # preserve for off-hours status page
+            self._last_decisions = self._serialise_decisions(decisions)
         write_status_page(
             self.status_path,
             broker=self.broker,
-            decisions=decisions,
+            decisions=self._last_decisions,   # always use serialised list
             cycle_count=self._cycle_count,
             started_at=self._started_at,
             refresh_seconds=max(10, self.poll_seconds),
