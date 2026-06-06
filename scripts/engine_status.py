@@ -368,9 +368,9 @@ def render() -> str:
     # Determine staleness label
     is_open    = mkt_status == "OPEN"
     if decisions and not is_open:
-        score_title = bold("SIGNAL SCORES") + dim(f"  (last market cycle — {age_str} ago)")
+        score_title = bold("SIGNAL SCORES") + dim(f"  (last market cycle — {age_str})")
     elif decisions:
-        score_title = bold("SIGNAL SCORES") + dim(f"  (live — updated {age_str} ago)")
+        score_title = bold("SIGNAL SCORES") + dim(f"  (live — updated {age_str})")
     else:
         score_title = bold("SIGNAL SCORES")
     lines.append(box_title(score_title))
@@ -422,7 +422,7 @@ def render() -> str:
     crypto_age        = _age(crypto_updated_at) if crypto_updated_at else "?"
 
     if crypto_decisions:
-        crypto_title = bold("CRYPTO SIGNALS") + dim(f"  (updated {crypto_age} ago — 24/7)")
+        crypto_title = bold("CRYPTO SIGNALS") + dim(f"  (updated {crypto_age} — 24/7)")
     else:
         crypto_title = bold("CRYPTO SIGNALS")
     lines.append(box_title(crypto_title))

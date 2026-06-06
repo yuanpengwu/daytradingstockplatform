@@ -34,7 +34,8 @@ def write_status_page(
     Wrapped so a rendering failure can never break the trading loop.
     """
     try:
-        now = datetime.now()
+        from datetime import timezone as _tz
+        now = datetime.now(_tz.utc)   # always UTC so _age() comparison is correct
         equity = broker.get_equity()
         cash = broker.get_cash()
         positions = broker.get_positions()
@@ -212,7 +213,8 @@ def write_crypto_decisions(
     """
     try:
         import json as _json
-        now = updated_at or datetime.now()
+        from datetime import timezone as _tz
+        now = updated_at or datetime.now(_tz.utc)   # always UTC
 
         if isinstance(decisions, list):
             dec_list = decisions
