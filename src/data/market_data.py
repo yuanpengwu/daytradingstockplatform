@@ -54,7 +54,9 @@ class MarketData:
         """
         # Fixed-range fetch — skip cache entirely (each range is unique)
         if start_dt is not None or end_dt is not None:
-            if self.provider == "alpaca":
+            if self.provider == "alpaca" and is_crypto_symbol(symbol):
+                result = self._fetch_alpaca_crypto(symbol, start_dt=start_dt, end_dt=end_dt)
+            elif self.provider == "alpaca":
                 result = self._fetch_alpaca(symbol, start_dt=start_dt, end_dt=end_dt)
             elif self.provider == "polygon":
                 result = self._fetch_polygon(symbol)

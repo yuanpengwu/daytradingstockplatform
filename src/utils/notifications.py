@@ -94,6 +94,27 @@ def _fmt_duration(seconds: float) -> str:
     return f"{s}s"
 
 
+def _fmt_price(price: float, is_crypto: bool = False) -> str:
+    """Format a dollar price. Crypto uses more decimal places for sub-$100 coins."""
+    if not is_crypto or price >= 100:
+        return f"${price:.2f}"
+    if price >= 1:
+        return f"${price:.4f}"
+    return f"${price:.6f}"
+
+
+def _fmt_qty(qty: float, symbol: str) -> str:
+    """Format quantity: fractional coin units for crypto, integer shares for stocks."""
+    if "/" in symbol:                          # e.g. BTC/USD, ETH/USD
+        base = symbol.split("/")[0]            # "BTC"
+        if qty >= 1:
+            return f"{qty:.4f} {base}"
+        if qty >= 0.0001:
+            return f"{qty:.6f} {base}"
+        return f"{qty:.8f} {base}"
+    return f"{qty:.0f} sh"
+
+
 def notify_order_entry(
     *,
     symbol: str,
@@ -104,7 +125,8 @@ def notify_order_entry(
     confidence: float,
     min_confidence: float = 0.0,         # effective confidence gate used
     agreement_ok: bool = True,           # ML + FinRL agreement gate
-    components: Dict[str, float],        # per-source weighted contributions
+    components: Dict[str, float],        # per-source weighted contributions (for log)
+    raw_scores: Optional[Dict[str, float]] = None,  # per-source raw scores [-1,+1] (for display)
     stop_loss: Optional[float],
     take_profit: Optional[float],
     regime_params: Optional[dict] = None,  # regime, adx, pp1_pct, eod_flatten …
@@ -112,9 +134,14 @@ def notify_order_entry(
     channels: Iterable[str] = ("console",),
 ) -> None:
     """Rich order-entry notification with per-signal breakdown and regime context."""
-    is_buy = side.lower() == "buy"
-    arrow  = "🟢 BUY" if is_buy else "🔴 SHORT"
-    color  = _COLOR_BUY if is_buy else _COLOR_SELL
+    is_buy    = side.lower() == "buy"
+    is_crypto = "/" in symbol
+    arrow     = "🟢 BUY" if is_buy else "🔴 SHORT"
+    color     = _COLOR_BUY if is_buy else _COLOR_SELL
+
+    # Formatted price / qty strings (crypto-aware)
+    price_str = _fmt_price(price, is_crypto)
+    qty_str   = _fmt_qty(qty, symbol)
 
     # Compute stop/TP as percentages
     sl_pct = ((stop_loss   - price) / price * 100) if stop_loss   else None
@@ -135,8 +162,15 @@ def notify_order_entry(
             eod_str = "`Yes`" if eod_flatten else "`No (trending)`"
 
     # ── Plain-text fallback ───────────────────────────────────────────────
+    # Use raw scores (full [-1,+1] range) so the signal line is readable at a
+    # glance.  The weighted components are tiny fractions (weight × conf × score)
+    # and convey nothing useful in a one-line notification.
+    # Fall back to components only when raw_scores aren't provided.
+    _pt_scores = raw_scores if raw_scores else components
     signal_lines = "  ".join(
-        f"{src}={v:+.3f}" for src, v in sorted(components.items())
+        f"{src}={v:+.3f}"
+        for src, v in sorted(_pt_scores.items(), key=lambda x: -abs(x[1]))
+        if abs(v) > 1e-4   # omit sources that returned no signal (dead / offline)
     )
     regime_part = ""
     if regime_str:
@@ -144,20 +178,23 @@ def notify_order_entry(
         if adx_str:
             regime_part += f" ADX={regime_params.get('adx', 0):.1f}"
     agree_tag = "" if agreement_ok else " [DISAGREE]"
+    # Guard against enter_threshold=None — it has a default of None in the
+    # function signature and older callers may not pass it.
+    gate_str = f"(gate={enter_threshold:+.3f})" if enter_threshold is not None else ""
     plain = (
-        f"[{arrow}] {qty:.0f} {symbol} @ ~${price:.2f} | "
-        f"score={agg_score:+.3f}(gate={enter_threshold:+.3f}) "
+        f"[{arrow}] {qty_str} {symbol} @ ~{price_str} | "
+        f"score={agg_score:+.3f}{gate_str} "
         f"conf={confidence:.0%}(gate={min_confidence:.0%}){agree_tag} | "
-        f"SL=${stop_loss}{f'({sl_pct:+.1f}%)' if sl_pct else ''} "
-        f"TP=${take_profit}{f'({tp_pct:+.1f}%)' if tp_pct else ''}"
+        f"SL={_fmt_price(stop_loss, is_crypto) if stop_loss else '—'}{f'({sl_pct:+.1f}%)' if sl_pct else ''} "
+        f"TP={_fmt_price(take_profit, is_crypto) if take_profit else '—'}{f'({tp_pct:+.1f}%)' if tp_pct else ''}"
         f"{regime_part} | {signal_lines}"
     )
 
     # ── Discord embed ─────────────────────────────────────────────────────
     fields = [
         # Row 1: price & qty
-        {"name": "Price",  "value": f"`${price:.2f}`",  "inline": True},
-        {"name": "Qty",    "value": f"`{qty:.0f} sh`",  "inline": True},
+        {"name": "Price",  "value": f"`{price_str}`",  "inline": True},
+        {"name": "Qty",    "value": f"`{qty_str}`",    "inline": True},
         {"name": "​", "value": "​",            "inline": True},  # spacer
 
         # Row 2: score & confidence (actual vs gate)
@@ -174,17 +211,17 @@ def notify_order_entry(
         {"name": "Conf Gate",      "value": f"`{min_confidence:.0%}`",     "inline": True},
         {"name": "ML×FinRL Agree", "value": "`✅ Yes`" if agreement_ok else "`⚠️ No`", "inline": True},
 
-        # Row 3: stop & take-profit (absolute + %)
+        # Row 4: stop & take-profit (absolute + %)
         {
             "name":   "Stop Loss",
-            "value":  (f"`${stop_loss:.2f}` `({sl_pct:+.1f}%)`" if stop_loss and sl_pct is not None
-                       else "`—`"),
+            "value":  (f"`{_fmt_price(stop_loss, is_crypto)}` `({sl_pct:+.1f}%)`"
+                       if stop_loss and sl_pct is not None else "`—`"),
             "inline": True,
         },
         {
             "name":   "Take Profit",
-            "value":  (f"`${take_profit:.2f}` `({tp_pct:+.1f}%)`" if take_profit and tp_pct is not None
-                       else "`—`"),
+            "value":  (f"`{_fmt_price(take_profit, is_crypto)}` `({tp_pct:+.1f}%)`"
+                       if take_profit and tp_pct is not None else "`—`"),
             "inline": True,
         },
         {"name": "​", "value": "​", "inline": True},  # spacer
@@ -198,16 +235,21 @@ def notify_order_entry(
             {"name": "EOD Flatten", "value": eod_str    or "`—`",  "inline": True},
         ]
 
-    # Signal breakdown sorted by abs contribution (strongest first)
-    if components:
+    # Signal breakdown — use raw scores for bars (full [-1,+1] range → readable bars)
+    # Fall back to weighted components if raw_scores not available.
+    display = raw_scores if raw_scores else components
+    if display:
         breakdown_lines = []
-        for src, v in sorted(components.items(), key=lambda x: -abs(x[1])):
-            bar_len = int(abs(v) * 20)          # visual bar up to 20 chars
-            bar     = ("█" * bar_len).ljust(10)
+        # Sort by absolute raw score descending (strongest signal first)
+        for src, v in sorted(display.items(), key=lambda x: -abs(x[1])):
+            bar_len = int(abs(v) * 16)                  # 0–16 blocks for [-1,+1]
+            bar     = ("█" * bar_len).ljust(16, "░")    # filled vs empty blocks
             sign    = "▲" if v >= 0 else "▼"
             emoji   = _SOURCE_EMOJI.get(src, "•")
+            # Also show the weighted contribution in parentheses for context
+            contrib = components.get(src, 0.0)
             breakdown_lines.append(
-                f"{emoji} **{src:<12}** {sign} `{v:+.4f}` `{bar}`"
+                f"{emoji} **{src:<12}** {sign} `{v:+.3f}` `{bar}` `w={contrib:+.3f}`"
             )
         fields.append({
             "name":   "━━ Signal Breakdown ━━",

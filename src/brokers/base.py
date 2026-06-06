@@ -94,6 +94,24 @@ class BrokerBase(ABC):
     def get_position(self, symbol: str) -> Optional[Position]:
         return self.get_positions().get(symbol)
 
+    def get_stock_positions(self) -> Dict[str, Position]:
+        """Return only equity (non-crypto) positions.
+
+        The stock engine calls this so it never sees crypto positions and
+        never needs to import or check is_crypto_symbol() itself.
+        """
+        return {sym: pos for sym, pos in self.get_positions().items()
+                if not is_crypto_symbol(sym)}
+
+    def get_crypto_positions(self) -> Dict[str, Position]:
+        """Return only crypto positions.
+
+        CryptoEngine calls this so it only sees its own positions and
+        never needs to filter out equities.
+        """
+        return {sym: pos for sym, pos in self.get_positions().items()
+                if is_crypto_symbol(sym)}
+
     # ---------- orders ----------
     @abstractmethod
     def submit_order(self, order: Order) -> Order: ...
@@ -103,6 +121,22 @@ class BrokerBase(ABC):
 
     @abstractmethod
     def get_open_orders(self) -> List[Order]: ...
+
+    def cancel_orders_for_symbol(self, symbol: str) -> int:
+        """Cancel all open orders for *symbol*. Returns count cancelled.
+
+        Default implementation filters get_open_orders() — brokers may
+        override with a faster native endpoint.
+        """
+        cancelled = 0
+        for o in self.get_open_orders():
+            if o.symbol == symbol and o.id:
+                try:
+                    self.cancel_order(o.id)
+                    cancelled += 1
+                except Exception:
+                    pass
+        return cancelled
 
     # ---------- market info ----------
     @abstractmethod

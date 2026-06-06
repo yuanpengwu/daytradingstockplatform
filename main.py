@@ -23,7 +23,7 @@ import yaml
 from dotenv import load_dotenv
 
 from src.engine import TradingEngine
-from src.crypto_engine import CryptoEngine
+from src.crypto import CryptoEngine
 from src.brokers import get_broker
 from src.utils.logger import get_logger
 

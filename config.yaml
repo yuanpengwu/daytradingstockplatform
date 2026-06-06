@@ -9,6 +9,7 @@ universe:
   method: sector_intelligence
   gemini_sector_call: false   # disabled — prepaid credits depleted; re-enable after topping up at aistudio.google.com
   stock_rank_by: volume_atr
+  universe_refresh_hours: 2   # re-score intraday sectors every N hours; 0 disables
   fallback_tickers:
   - AAPL
   - MSFT
@@ -57,8 +58,11 @@ signals:
     atr_period: 70
   sentiment:
     sources:
-    - newsapi
-    - finnhub
+    - alpaca      # real-time, free with existing Alpaca key (ALPACA_API_KEY/SECRET)
+    - polygon     # high-quality, uses existing POLYGON_API_KEY
+    - stocktwits  # crowd sentiment, no API key needed (200 req/hr free, 5-min cache)
+    # - newsapi   # fallback: set NEWSAPI_KEY in .env
+    # - finnhub   # fallback: set FINNHUB_API_KEY in .env
     max_age_minutes: 120
     model: vader
   fundamental:

@@ -132,7 +132,12 @@ class TradingEngine:
 
         self._last_day_started = None
         self._last_universe_refresh: Optional[datetime] = None
-        self._universe_refresh_minutes: int = int(sched.get("universe_refresh_minutes", 60))
+        # How often to run the intraday sector re-score during market hours.
+        # Read from universe.universe_refresh_hours (not schedule.*) so it lives
+        # next to the other universe config rather than being buried in schedule.
+        # 0 or negative disables the periodic refresh entirely.
+        _ucfg = config.get("universe", {})
+        self._universe_refresh_hours: float = float(_ucfg.get("universe_refresh_hours", 2.0))
         self._cycle_count = 0
         self._started_at = datetime.now()
 
@@ -276,9 +281,10 @@ class TradingEngine:
                     log.info("Symbols still in cooloff: %s", list(self._cooloff_until.keys()))
 
             dynamic_tickers = self.universe.select_tickers()
-            # Ensure we keep monitoring any open positions so we can exit them
-            open_positions = self.broker.get_positions()
-            current_holdings = list(open_positions.keys())
+            # Keep monitoring any open stock positions so we can exit them.
+            # get_stock_positions() excludes crypto at the broker level — this
+            # engine never needs to know that crypto positions exist.
+            current_holdings = list(self.broker.get_stock_positions().keys())
 
             # Combine and remove duplicates while keeping order
             combined = dynamic_tickers + [t for t in current_holdings if t not in dynamic_tickers]
@@ -288,9 +294,10 @@ class TradingEngine:
             self._last_day_started = today
             self._last_universe_refresh = now_ny   # day-start counts as first refresh
 
-        # ── Hourly intraday universe refresh ──────────────────────────────────
-        # Re-scores all sector ETFs on the last 60 min of 5-min bars and rotates
-        # the stock pool to whichever sectors are moving right now.
+        # ── Periodic intraday universe refresh ────────────────────────────────
+        # Re-scores sector ETFs on intraday 5-min bars and rotates the stock
+        # pool to whichever sectors are moving right now.
+        # Frequency: universe.universe_refresh_hours in config.yaml (default 2h).
         elif self._should_refresh_universe(now_ny):
             self._intraday_universe_refresh(now_ny)
 
@@ -582,17 +589,28 @@ class TradingEngine:
             return 0.0
 
     def _should_refresh_universe(self, now_ny: datetime) -> bool:
-        """True when enough time has passed since the last universe refresh."""
-        if self._last_universe_refresh is None:
+        """True when enough market-hours time has passed for a universe refresh.
+
+        Returns False immediately when:
+          • universe_refresh_hours ≤ 0  (feature disabled in config)
+          • no previous refresh timestamp recorded yet
+        """
+        if self._universe_refresh_hours <= 0 or self._last_universe_refresh is None:
             return False
-        elapsed_min = (now_ny - self._last_universe_refresh).total_seconds() / 60
-        return elapsed_min >= self._universe_refresh_minutes
+        elapsed_h = (now_ny - self._last_universe_refresh).total_seconds() / 3600
+        return elapsed_h >= self._universe_refresh_hours
 
     def _intraday_universe_refresh(self, now_ny: datetime) -> None:
-        """Rotate the ticker pool based on current intraday sector momentum."""
+        """Rotate the ticker pool based on current intraday sector momentum.
+
+        Tickers with open positions are always kept in the pool even if they
+        drop out of the fresh selection — they are never force-exited here.
+        New tickers that enter the selection become eligible for entries immediately.
+        """
         log.info(
-            "Hourly universe refresh at %s ET — re-scoring sectors on 5-min bars …",
+            "Universe refresh at %s ET (every %.0fh) — re-scoring intraday sectors …",
             now_ny.strftime("%H:%M"),
+            self._universe_refresh_hours,
         )
         new_tickers = self.universe.select_tickers_intraday()
         if not new_tickers:
@@ -600,19 +618,32 @@ class TradingEngine:
             self._last_universe_refresh = now_ny
             return
 
-        # Always keep tickers with open positions so we can manage/exit them
+        # Carry over any tickers with open positions that didn't make the fresh cut.
+        # They stay in self.tickers so the engine keeps fetching their bars and can
+        # fire stops / TPs / trailing exits normally.
         open_syms = list(self.broker.get_positions().keys())
-        combined = new_tickers + [t for t in open_syms if t not in new_tickers]
+        retained  = sorted(s for s in open_syms if s not in new_tickers)
+        combined  = new_tickers + retained
 
-        added   = sorted(set(combined) - set(self.tickers))
-        removed = sorted(set(self.tickers) - set(combined))
-        if added or removed:
+        # Diff against the OLD universe (compare against fresh selection only —
+        # not the carry-over set — so "removed" means truly dropped from next cycle).
+        old_set   = set(self.tickers)
+        new_set   = set(new_tickers)
+        added     = sorted(new_set - old_set)
+        removed   = sorted(old_set - new_set - set(retained))
+        unchanged = sorted(old_set & new_set)
+
+        if retained:
             log.info(
-                "Universe rotated | +added=%s  -removed=%s | new pool: %s",
-                added, removed, combined,
+                "Universe refreshed: added %s, removed %s, unchanged %s"
+                " (retained for open positions: %s)",
+                added, removed, unchanged, retained,
             )
         else:
-            log.info("Universe unchanged after hourly refresh.")
+            log.info(
+                "Universe refreshed: added %s, removed %s, unchanged %s",
+                added, removed, unchanged,
+            )
 
         self.tickers = combined
         self._last_universe_refresh = now_ny

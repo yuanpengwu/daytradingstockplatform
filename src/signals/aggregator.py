@@ -47,7 +47,8 @@ class AggregatedDecision:
     symbol: str
     score: float                  # in [-1, +1]
     confidence: float             # in [0, 1]
-    components: Dict[str, float]  # per-source contribution
+    components: Dict[str, float]  # per-source weighted contribution (weight × conf × score)
+    raw_scores: Dict[str, float]  # per-source raw signal score in [-1, +1] — for display
     enter_long: float = 0.35      # effective threshold (may be scaled down)
     enter_short: float = -0.35    # effective threshold (may be scaled down)
     min_confidence: float = 0.25  # effective threshold (may be scaled down)
@@ -223,7 +224,8 @@ class SignalAggregator:
 
         out: Dict[str, AggregatedDecision] = {}
         for sym, sigs in by_sym.items():
-            comp: Dict[str, float] = {}
+            comp: Dict[str, float] = {}       # weighted contributions (for math)
+            raw:  Dict[str, float] = {}       # raw signal scores in [-1, +1] (for display)
             num = 0.0
             den = 0.0   # Σ(weight × confidence) across active signals
 
@@ -232,6 +234,7 @@ class SignalAggregator:
                 eff = w * s.confidence          # zero-confidence signals contribute nothing
                 contribution = eff * s.score
                 comp[s.source.value] = contribution
+                raw[s.source.value]  = s.score  # raw score before weighting
                 num += contribution
                 den += eff
 
@@ -306,6 +309,7 @@ class SignalAggregator:
                 score=float(np.clip(score, -1.0, 1.0)),
                 confidence=confidence,
                 components=comp,
+                raw_scores=raw,
                 enter_long=eff_enter_long,
                 enter_short=eff_enter_short,
                 min_confidence=eff_min_conf,

@@ -59,6 +59,7 @@ def _retry(fn: Callable[[], T], what: str, attempts: int = 3) -> T:
     raise ConnectionError(f"Alpaca {what} failed after {attempts} attempts: {last}")
 
 
+
 def _map_alpaca_status(status: str) -> OrderStatus:
     s = status.lower()
     if s == "filled":
@@ -122,13 +123,52 @@ class AlpacaBroker(BrokerBase):
         raw = _retry(self._client.get_all_positions, "get_positions")
         out: Dict[str, Position] = {}
         for p in raw:
-            out[p.symbol] = Position(
-                symbol=p.symbol,
+            sym = self._normalize_symbol(p)
+            out[sym] = Position(
+                symbol=sym,
                 qty=float(p.qty),
                 avg_entry_price=float(p.avg_entry_price),
                 current_price=float(p.current_price or 0),
             )
         return out
+
+    @staticmethod
+    def _normalize_symbol(p) -> str:
+        """Normalize Alpaca position symbols to the canonical slash format.
+
+        Alpaca's REST API returns crypto positions without a slash
+        (AVAXUSD, LINKUSD) but its crypto-bars and order endpoints require
+        the slash form (AVAX/USD, LINK/USD).  Without normalization:
+          • bar fetches fail: "invalid symbol: AVAXUSD"
+          • sell orders fail: "invalid crypto time_in_force"
+
+        Strategy
+        ---------
+        1. If the symbol already has a slash → already correct, return as-is.
+        2. Try the asset_class == CRYPTO guard from alpaca-py (most reliable).
+        3. Fallback: string heuristic (ends with "USD", len > 4) — safe because
+           no real US equity ticker ends in "USD".
+        """
+        sym = p.symbol
+        if "/" in sym:
+            return sym                       # already in canonical form
+
+        # Primary: use the SDK's asset_class attribute
+        try:
+            from alpaca.trading.enums import AssetClass
+            if getattr(p, "asset_class", None) == AssetClass.CRYPTO:
+                if sym.upper().endswith("USD") and len(sym) > 4:
+                    return sym[:-3] + "/USD"
+                return sym
+        except Exception:
+            pass
+
+        # Fallback: pure string check (catches cases where asset_class import
+        # fails or the attribute is missing — e.g., older alpaca-py versions)
+        if sym.upper().endswith("USD") and len(sym) > 4:
+            return sym[:-3] + "/USD"
+
+        return sym
 
     # ---------- orders ----------
     def submit_order(self, order: Order) -> Order:
@@ -184,8 +224,9 @@ class AlpacaBroker(BrokerBase):
         # "new" or "accepted", not "filled". Poll once after a short delay so
         # the caller sees the true fill status and fill price, which is required
         # for notifications and trade history to fire correctly.
+        # Crypto orders can take longer to confirm than equities.
         if order.type == OrderType.MARKET and order.status == OrderStatus.PENDING:
-            time.sleep(2)
+            time.sleep(5 if crypto else 2)
             try:
                 updated = self._client.get_order_by_id(order.id)
                 order.status = _map_alpaca_status(updated.status.value) if updated.status else order.status
@@ -206,6 +247,28 @@ class AlpacaBroker(BrokerBase):
             self._client.cancel_order_by_id(order_id)
         except Exception as e:
             log.warning("Cancel failed for %s: %s", order_id, e)
+
+    def cancel_orders_for_symbol(self, symbol: str) -> int:
+        """Cancel all open orders for *symbol* using a symbol-filtered query."""
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+        try:
+            orders = _retry(
+                lambda: self._client.get_orders(filter=req),
+                f"get_orders_for_cancel({symbol})",
+            )
+            for o in orders:
+                try:
+                    self._client.cancel_order_by_id(str(o.id))
+                except Exception as e:
+                    log.warning("cancel_orders_for_symbol: failed to cancel %s: %s", o.id, e)
+            if orders:
+                log.info("Cancelled %d open order(s) for %s before close.", len(orders), symbol)
+            return len(orders)
+        except Exception as e:
+            log.warning("cancel_orders_for_symbol(%s) failed: %s", symbol, e)
+            return 0
 
     def get_open_orders(self) -> List[Order]:
         from alpaca.trading.requests import GetOrdersRequest

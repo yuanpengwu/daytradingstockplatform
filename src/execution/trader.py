@@ -305,6 +305,7 @@ class Trader:
                 min_confidence=dec.min_confidence,
                 agreement_ok=dec.agreement_ok,
                 components=dec.components,
+                raw_scores=dec.raw_scores,
                 stop_loss=rd.stop_loss,
                 take_profit=rd.take_profit,
                 regime_params=regime_params,
@@ -316,7 +317,7 @@ class Trader:
     def manage_open_positions(self, aggregated: Dict[str, AggregatedDecision]) -> None:
         """Sweep current positions; fire partial exits, then full exits."""
         self.recent_stop_losses.clear()   # reset each cycle; engine reads after this call
-        positions = self.broker.get_positions()
+        positions = self.broker.get_stock_positions()   # crypto excluded at broker level
         for sym, pos in positions.items():
             self._update_trailing_high(pos)
 
@@ -340,17 +341,18 @@ class Trader:
                 self._close_position(pos, reason)
 
     def flatten_all(self, reason: str = "end-of-day flatten") -> None:
-        for sym, pos in self.broker.get_positions().items():
+        for pos in self.broker.get_stock_positions().values():
             self._close_position(pos, reason)
 
     def flatten_eod_eligible(self, reason: str = "eod_flatten") -> None:
-        """Close only positions that should be flattened at EOD.
+        """Close only stock positions that should be flattened at EOD.
 
         TRENDING positions (eod_flatten=False) are skipped — they are
         allowed to run overnight and exit via stop/TP/signal on a future cycle.
         CHOPPY and NEUTRAL positions (eod_flatten=True, the default) are closed.
+        Crypto positions never appear here — get_stock_positions() excludes them.
         """
-        positions = self.broker.get_positions()
+        positions = self.broker.get_stock_positions()
         for sym, pos in positions.items():
             rp = self._regime_params.get(sym, {})
             if not rp.get("eod_flatten", True):
