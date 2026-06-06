@@ -122,6 +122,25 @@ class BrokerBase(ABC):
     @abstractmethod
     def get_open_orders(self) -> List[Order]: ...
 
+    def close_position(self, symbol: str) -> bool:
+        """Close the full position for *symbol* at market, regardless of qty.
+
+        Default implementation submits a market sell for the current qty.
+        Brokers can override with a native endpoint (e.g. Alpaca's close_position).
+        Returns True if the close was attempted, False if no position was found.
+        """
+        pos = self.get_position(symbol)
+        if pos is None or pos.qty == 0:
+            return False
+        order = Order(
+            symbol=symbol,
+            side=OrderSide.SELL,
+            qty=abs(pos.qty),
+            type=OrderType.MARKET,
+        )
+        self.submit_order(order)
+        return True
+
     def cancel_orders_for_symbol(self, symbol: str) -> int:
         """Cancel all open orders for *symbol*. Returns count cancelled.
 

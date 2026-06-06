@@ -248,6 +248,25 @@ class AlpacaBroker(BrokerBase):
         except Exception as e:
             log.warning("Cancel failed for %s: %s", order_id, e)
 
+    def close_position(self, symbol: str) -> bool:
+        """Close the full position using Alpaca's native close-position endpoint.
+
+        Preferred over submitting a manual sell order because:
+          • Works for any qty, including tiny fractional crypto remnants
+          • Alpaca calculates the exact qty server-side — no precision issues
+          • Idempotent: returns gracefully if no position exists
+        """
+        try:
+            self._client.close_position(symbol)
+            log.info("Alpaca close_position(%s) submitted.", symbol)
+            return True
+        except Exception as e:
+            err = str(e)
+            if "position does not exist" in err.lower() or "404" in err:
+                return False   # already closed — not an error
+            log.warning("close_position(%s) failed: %s", symbol, e)
+            return False
+
     def cancel_orders_for_symbol(self, symbol: str) -> int:
         """Cancel all open orders for *symbol* using a symbol-filtered query."""
         from alpaca.trading.requests import GetOrdersRequest
