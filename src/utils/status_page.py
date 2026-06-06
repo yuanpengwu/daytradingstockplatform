@@ -193,6 +193,49 @@ def write_status_page(
             ]
         }
         Path(path.replace(".html", ".json")).write_text(json.dumps(state), encoding="utf-8")
-        
+
     except Exception as e:
         log.warning("Failed to write status page: %s", e)
+
+
+def write_crypto_decisions(
+    path: str,
+    decisions: dict,
+    updated_at: Optional[datetime] = None,
+) -> None:
+    """Write crypto signal decisions to a sidecar JSON file (crypto_status.json).
+
+    Called by CryptoEngine every cycle so the dashboard always has fresh crypto
+    scores independently of the stock engine's write_status_page() calls.
+
+    ``decisions`` is a dict  {sym: AggregatedDecision}  or a pre-serialised list.
+    """
+    try:
+        import json as _json
+        now = updated_at or datetime.now()
+
+        if isinstance(decisions, list):
+            dec_list = decisions
+        else:
+            dec_list = [
+                {
+                    "symbol":     sym,
+                    "score":      d.score,
+                    "confidence": d.confidence,
+                    "action":     d.action,
+                    "components": {k: round(v, 4) for k, v in d.components.items()}
+                                  if hasattr(d, "components") else {},
+                    "raw_scores": {k: round(v, 4) for k, v in d.raw_scores.items()}
+                                  if hasattr(d, "raw_scores") else {},
+                }
+                for sym, d in decisions.items()
+            ]
+
+        payload = {
+            "updated_at": now.isoformat(),
+            "crypto_decisions": dec_list,
+        }
+        p = Path(path).parent / "crypto_status.json"
+        p.write_text(_json.dumps(payload), encoding="utf-8")
+    except Exception as e:
+        log.warning("Failed to write crypto_status.json: %s", e)

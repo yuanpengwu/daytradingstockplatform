@@ -149,6 +149,16 @@ def get_status_json() -> dict:
         return {}
 
 
+def get_crypto_status_json() -> dict:
+    p = ROOT / "crypto_status.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def get_positions_from_alpaca():
     try:
         from alpaca.trading.client import TradingClient
@@ -282,6 +292,7 @@ def render() -> str:
     today_trades            = get_today_trades()
     log_events              = get_log_events(14)
     st                      = get_status_json()
+    cst                     = get_crypto_status_json()
 
     lines: list[str] = []
 
@@ -402,6 +413,53 @@ def render() -> str:
 
             row = (f"  {act_col} {bold(sym):<10}  "
                    f"{sign_ch} {score_str}  {dim(bar_fill)}  "
+                   f"conf={conf:.0%}  {dim(top3_str)}")
+            lines.append(box_row(row))
+
+    # ── Crypto signal scores ──────────────────────────────────────────────────
+    crypto_decisions  = cst.get("crypto_decisions", [])
+    crypto_updated_at = cst.get("updated_at", "")
+    crypto_age        = _age(crypto_updated_at) if crypto_updated_at else "?"
+
+    if crypto_decisions:
+        crypto_title = bold("CRYPTO SIGNALS") + dim(f"  (updated {crypto_age} ago — 24/7)")
+    else:
+        crypto_title = bold("CRYPTO SIGNALS")
+    lines.append(box_title(crypto_title))
+
+    if not crypto_decisions:
+        lines.append(box_row(dim("  Waiting for first crypto cycle…")))
+    else:
+        action_order = {"BUY": 0, "SELL": 1, "HOLD": 2}
+        for d in sorted(crypto_decisions,
+                        key=lambda d: (action_order.get(d.get("action","HOLD"),2),
+                                       -abs(d.get("score",0)))):
+            sym    = d.get("symbol", "?")
+            score  = d.get("score", 0.0)
+            conf   = d.get("confidence", 0.0)
+            action = d.get("action", "HOLD")
+            display = d.get("raw_scores") or d.get("components", {})
+            top3    = sorted(display.items(), key=lambda x: -abs(x[1]))[:2]
+            top3_str = "  ".join(f"{k}={v:+.3f}" for k, v in top3)
+
+            if action == "BUY":
+                act_col = green(f"[{action:<4}]")
+            elif action == "SELL":
+                act_col = red(f"[{action:<4}]")
+            else:
+                act_col = dim(f"[{action:<4}]")
+
+            bar_len   = min(16, int(abs(score) * 16))
+            bar_fill  = ("█" * bar_len).ljust(16, "░")
+            score_col = green if score >= 0 else red
+            sign_ch   = "▲" if score >= 0 else "▼"
+
+            # Show whether this pair is currently held
+            held = any(p["symbol"] == sym for p in positions if p.get("is_crypto"))
+            tag  = cyan(" [HELD]") if held else ""
+
+            row = (f"  {act_col} {bold(sym):<10}{tag}  "
+                   f"{sign_ch} {score_col(f'{score:+.3f}')}  {dim(bar_fill)}  "
                    f"conf={conf:.0%}  {dim(top3_str)}")
             lines.append(box_row(row))
 
