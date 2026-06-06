@@ -36,6 +36,10 @@ def write_status_page(
     try:
         from datetime import timezone as _tz
         now = datetime.now(_tz.utc)   # always UTC so _age() comparison is correct
+        # Normalise started_at to UTC-aware so (now - started_at) never raises
+        # "can't subtract offset-naive" when the engine passes a naive datetime.
+        if started_at is not None and started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=_tz.utc)
         equity = broker.get_equity()
         cash = broker.get_cash()
         positions = broker.get_positions()
