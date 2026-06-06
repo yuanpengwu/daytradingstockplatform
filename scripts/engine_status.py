@@ -350,22 +350,42 @@ def render() -> str:
         lines.append(box_row(dim("  (no open positions)")))
 
     # ── Signal decisions table ────────────────────────────────────────────────
-    decisions = st.get("decisions", [])
-    if decisions:
-        lines.append(box_title(bold("SIGNAL SCORES  (last cycle)")))
+    decisions  = st.get("decisions", [])
+    updated_at = st.get("updated_at", "")
+    age_str    = _age(updated_at) if updated_at else "?"
+
+    # Determine staleness label
+    is_open    = mkt_status == "OPEN"
+    if decisions and not is_open:
+        score_title = bold("SIGNAL SCORES") + dim(f"  (last market cycle — {age_str} ago)")
+    elif decisions:
+        score_title = bold("SIGNAL SCORES") + dim(f"  (live — updated {age_str} ago)")
+    else:
+        score_title = bold("SIGNAL SCORES")
+    lines.append(box_title(score_title))
+
+    if not decisions:
+        lines.append(box_row(dim("  Waiting for first trading cycle…  "
+                                 "(scores appear at market open)")))
+    else:
         # Sort: BUY first, then by abs score descending
         action_order = {"BUY": 0, "SELL": 1, "HOLD": 2}
         sorted_dec = sorted(decisions,
-                            key=lambda d: (action_order.get(d.get("action","HOLD"), 2),
+                            key=lambda d: (action_order.get(d.get("action", "HOLD"), 2),
                                            -abs(d.get("score", 0))))
-        for d in sorted_dec[:18]:   # show top 18
+        for d in sorted_dec[:18]:
             sym    = d.get("symbol", "?")
             score  = d.get("score", 0.0)
             conf   = d.get("confidence", 0.0)
             action = d.get("action", "HOLD")
-            comps  = d.get("components", {})
 
-            # Action colour
+            # Prefer raw_scores for bar (full [-1,+1] range); fall back to components
+            display_scores = d.get("raw_scores") or d.get("components", {})
+            # Top-3 by absolute raw score
+            top3 = sorted(display_scores.items(), key=lambda x: -abs(x[1]))[:3]
+            top3_str = "  ".join(f"{k}={v:+.3f}" for k, v in top3)
+
+            # Action colour tag
             if action == "BUY":
                 act_col = green(f"[{action:<4}]")
             elif action == "SELL":
@@ -373,19 +393,15 @@ def render() -> str:
             else:
                 act_col = dim(f"[{action:<4}]")
 
-            # Score bar (16 chars)
-            bar_len = min(16, int(abs(score) * 16))
-            bar_fill = ("█" * bar_len).ljust(8, "░")
+            # Score bar using aggregate score
+            bar_len  = min(16, int(abs(score) * 16))
+            bar_fill = ("█" * bar_len).ljust(16, "░")
             score_col = green if score >= 0 else red
             score_str = score_col(f"{score:+.3f}")
-            sign_ch = "▲" if score >= 0 else "▼"
+            sign_ch   = "▲" if score >= 0 else "▼"
 
-            # Top-3 contributors
-            top3 = sorted(comps.items(), key=lambda x: -abs(x[1]))[:3]
-            top3_str = "  ".join(f"{k}={v:+.3f}" for k, v in top3)
-
-            row = (f"  {act_col} {bold(sym):<8}  "
-                   f"{sign_ch} {score_str} `{bar_fill}`  "
+            row = (f"  {act_col} {bold(sym):<10}  "
+                   f"{sign_ch} {score_str}  {dim(bar_fill)}  "
                    f"conf={conf:.0%}  {dim(top3_str)}")
             lines.append(box_row(row))
 

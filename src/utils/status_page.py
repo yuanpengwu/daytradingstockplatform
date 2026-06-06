@@ -165,11 +165,14 @@ def write_status_page(
             ],
             "decisions": [
                 {
-                    "symbol": sym,
-                    "score": d.score,
+                    "symbol":     sym,
+                    "score":      d.score,
                     "confidence": d.confidence,
-                    "action": d.action,
-                    "components": {k: round(v, 4) for k, v in d.components.items()} if hasattr(d, "components") else {}
+                    "action":     d.action,
+                    "components": {k: round(v, 4) for k, v in d.components.items()}
+                                  if hasattr(d, "components") else {},
+                    "raw_scores": {k: round(v, 4) for k, v in d.raw_scores.items()}
+                                  if hasattr(d, "raw_scores") else {},
                 } for sym, d in (decisions or {}).items()
             ]
         }

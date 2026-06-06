@@ -132,6 +132,7 @@ class TradingEngine:
 
         self._last_day_started = None
         self._last_universe_refresh: Optional[datetime] = None
+        self._last_decisions: Dict = {}   # preserved so status page shows last scores off-hours
         # How often to run the intraday sector re-score during market hours.
         # Read from universe.universe_refresh_hours (not schedule.*) so it lives
         # next to the other universe config rather than being buried in schedule.
@@ -227,10 +228,12 @@ class TradingEngine:
         if self.market_hours_only and not self._within_trading_window(now_ny):
             log.debug("Outside trading window (%s NY); skipping.", now_ny.time())
             self._cycle_count += 1
+            # Preserve last known decisions so the dashboard keeps showing scores
+            # instead of going blank every time the market closes.
             write_status_page(
                 self.status_path,
                 broker=self.broker,
-                decisions={},
+                decisions=self._last_decisions,
                 cycle_count=self._cycle_count,
                 started_at=self._started_at,
                 refresh_seconds=max(10, self.poll_seconds),
@@ -489,6 +492,8 @@ class TradingEngine:
 
         # 5. Write the live status page (never let this break the loop).
         self._cycle_count += 1
+        if decisions:
+            self._last_decisions = decisions   # preserve for off-hours status page
         write_status_page(
             self.status_path,
             broker=self.broker,
