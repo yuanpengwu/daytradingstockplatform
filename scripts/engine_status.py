@@ -425,14 +425,18 @@ def render() -> str:
 
     # ── Live log ──────────────────────────────────────────────────────────────
     lines.append(box_title(bold("LIVE LOG")))
+    # Log format: "2026-06-06 10:35:18 INFO    src.module.name | message text"
+    _LOG_RE = re.compile(
+        r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+\w+\s+([\w.]+)\s*\|\s*(.*)'
+    )
     for raw in log_events:
-        parts = raw.split(" ", 4)
-        if len(parts) >= 5:
-            ts_str  = parts[0] + " " + parts[1]
-            src_str = parts[3] if len(parts) > 3 else ""
-            msg_str = parts[4].lstrip("| ") if len(parts) > 4 else ""
+        m = _LOG_RE.match(raw)
+        if m:
+            ts_str    = m.group(1)
+            src_str   = m.group(2)
+            msg_str   = m.group(3).strip()
             short_ts  = ts_str[11:19]
-            short_src = src_str.split(".")[-1][:16] if src_str else ""
+            short_src = src_str.split(".")[-1][:16]
             msg_trunc = msg_str[:56]
             if any(x in msg_str for x in ("ENTRY", "CRYPTO ENTRY", "filled")):
                 msg_col = cyan(msg_trunc)
@@ -450,7 +454,8 @@ def render() -> str:
                 f"  {dim(short_ts)}  {dim(f'{short_src:<16}')}  {msg_col}"
             ))
         else:
-            lines.append(box_row(f"  {dim(raw[:WIDTH - 4])}"))
+            # Fallback: show the last 60 chars if regex didn't match
+            lines.append(box_row(f"  {dim(raw.strip()[:60])}"))
 
     lines.append(box_bot())
     lines.append(dim(f"  Refreshed {datetime.now().strftime('%H:%M:%S')}  │  Ctrl+C to exit"))
