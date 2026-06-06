@@ -80,14 +80,16 @@ class CryptoEngine:
         self._ml = MLSignal(crypto_ml_cfg)
         self._ml_last_trained: Optional[date] = None
 
-        entry_thresh = float(ccfg.get("enter_long_threshold", 0.35))
-        min_conf     = float(ccfg.get("min_confidence", 0.45))
+        entry_thresh  = float(ccfg.get("enter_long_threshold",  0.35))
+        entry_short   = float(ccfg.get("enter_short_threshold", -entry_thresh))
+        min_conf      = float(ccfg.get("min_confidence", 0.45))
         self._agg = SignalAggregator(
             weights={"technical": 0.50, "ml": 0.50},
             enter_long=entry_thresh,
-            enter_short=-entry_thresh,
+            enter_short=entry_short,
             min_confidence=min_conf,
         )
+        self._short_notional: float = float(ccfg.get("short_max_notional", 300))
 
         # Entry gates (evaluated in _evaluate_entry)
         self._tech_gate:    float = float(ccfg.get("tech_score_gate", 0.05))
@@ -200,13 +202,13 @@ class CryptoEngine:
         # Write crypto signals to crypto_status.json for the dashboard
         write_crypto_decisions("status.json", all_decisions)
 
-        # ── Pass 2: place new entries for untracked pairs with a BUY signal ───
+        # ── Pass 2: place new entries for untracked pairs ─────────────────────
         crypto_exposure  = sum(pos.market_value for pos in positions.values())
         max_exposure_usd = equity * self._max_exposure
 
         for sym in self.universe.tickers:
             if self.trader.is_tracking(sym):
-                continue
+                continue  # already in a position (long or short)
             if crypto_exposure >= max_exposure_usd:
                 log.debug(
                     "Crypto exposure limit reached (%.0f/%.0f) — no new entries.",
@@ -215,10 +217,10 @@ class CryptoEngine:
                 break
 
             dec = all_decisions.get(sym)
-            if dec is None or dec.action != "BUY":
+            if dec is None:
                 continue
 
-            # Re-check tech gate (already computed above)
+            # Re-check tech gate
             tech_sig = self._tech.evaluate(sym, bars_cache.get(sym)) \
                        if bars_cache.get(sym) is not None else None
             if tech_sig is None or abs(tech_sig.score) < self._tech_gate:
@@ -228,12 +230,16 @@ class CryptoEngine:
             if price <= 0:
                 continue
 
-            notional = min(self._max_notional, equity * 0.05)
-            if notional < 10:
-                log.debug("Crypto %s: notional $%.2f too small — skipping.", sym, notional)
-                continue
-
             try:
-                self.trader.place_entry(sym, price, notional, dec)
+                if dec.action == "BUY":
+                    notional = min(self._max_notional, equity * 0.05)
+                    if notional >= 10:
+                        self.trader.place_entry(sym, price, notional, dec)
+
+                elif dec.action == "SELL" and self.trader.shorting_enabled:
+                    notional = min(self._short_notional, equity * 0.03)
+                    if notional >= 10:
+                        self.trader.place_short_entry(sym, price, notional, dec)
+
             except Exception as e:
                 log.warning("CryptoEngine entry failed for %s: %s", sym, e, exc_info=True)
