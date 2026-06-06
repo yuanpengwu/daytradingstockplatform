@@ -180,9 +180,12 @@ crypto:
   enter_short_threshold: -0.35     # mirror of enter_long (score ≤ this triggers short)
   tech_score_gate: 0.05
   min_entry_adx: 20
-  # Short selling (requires Alpaca margin-enabled account)
-  shorting_enabled: true           # set false to disable shorts entirely
-  short_max_notional: 300          # smaller notional for shorts (higher risk)
+  # Short selling — NOT supported by Alpaca for crypto (crypto is cash-only,
+  # you can only sell what you own). Alpaca equity shorts work but crypto shorts
+  # return {"available":"0"} regardless of account type.
+  # Leave false unless you switch to a broker that supports crypto margin.
+  shorting_enabled: false
+  short_max_notional: 300          # kept for future broker compatibility
   # Dedicated crypto ML model (trained on crypto bars only, separate from stock model)
   ml:
     mode: local

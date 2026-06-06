@@ -98,12 +98,13 @@ class CryptoEngine:
 
         log.info(
             "CryptoEngine initialised | tickers=%s | notional=$%.0f | "
-            "stop=%.0f%% tp=%.0f%% trail=%.0f%% | ml_model=%s",
+            "stop=%.0f%% tp=%.0f%% trail=%.0f%% | shorts=%s | ml_model=%s",
             self.universe.tickers,
             self._max_notional,
             self.trader._stop_pct * 100,
             self.trader._tp_pct * 100,
             self.trader._trail_pct * 100,
+            "ENABLED" if self.trader.shorting_enabled else "disabled (Alpaca crypto = cash-only)",
             crypto_ml_cfg["model_path"],
         )
 
