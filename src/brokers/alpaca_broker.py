@@ -251,21 +251,36 @@ class AlpacaBroker(BrokerBase):
     def close_position(self, symbol: str) -> bool:
         """Close the full position using Alpaca's native close-position endpoint.
 
-        Preferred over submitting a manual sell order because:
+        Preferred over a manual sell order because:
           • Works for any qty, including tiny fractional crypto remnants
-          • Alpaca calculates the exact qty server-side — no precision issues
+          • Alpaca calculates the exact qty server-side (no precision issues)
           • Idempotent: returns gracefully if no position exists
+
+        Alpaca's close_position endpoint requires its *internal* symbol format:
+          get_positions returns  LINK/USD  (our canonical form, after normalisation)
+          close_position expects LINKUSD   (Alpaca's native no-slash crypto format)
+        We try the canonical form first and fall back to the no-slash form.
         """
-        try:
-            self._client.close_position(symbol)
-            log.info("Alpaca close_position(%s) submitted.", symbol)
-            return True
-        except Exception as e:
-            err = str(e)
-            if "position does not exist" in err.lower() or "404" in err:
-                return False   # already closed — not an error
-            log.warning("close_position(%s) failed: %s", symbol, e)
-            return False
+        # Build list of formats to try: canonical first, then no-slash fallback
+        candidates = [symbol]
+        if "/" in symbol:
+            candidates.append(symbol.replace("/", ""))   # LINK/USD → LINKUSD
+
+        for sym in candidates:
+            try:
+                self._client.close_position(sym)
+                log.info("Alpaca close_position(%s) submitted.", sym)
+                return True
+            except Exception as e:
+                err = str(e).lower()
+                if "not found" in err or "404" in err or "does not exist" in err:
+                    continue   # try next format
+                log.warning("close_position(%s) failed: %s", sym, e)
+                return False
+
+        # All formats returned 404 — position is already gone on broker side
+        log.info("close_position(%s): no active position found — already clean.", symbol)
+        return False
 
     def cancel_orders_for_symbol(self, symbol: str) -> int:
         """Cancel all open orders for *symbol* using a symbol-filtered query."""
