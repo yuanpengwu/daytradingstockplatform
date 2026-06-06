@@ -248,39 +248,69 @@ class AlpacaBroker(BrokerBase):
         except Exception as e:
             log.warning("Cancel failed for %s: %s", order_id, e)
 
-    def close_position(self, symbol: str) -> bool:
+    def close_position(self, symbol: str) -> "Order":
         """Close the full position using Alpaca's native close-position endpoint.
 
-        Preferred over a manual sell order because:
-          • Works for any qty, including tiny fractional crypto remnants
-          • Alpaca calculates the exact qty server-side (no precision issues)
-          • Idempotent: returns gracefully if no position exists
+        Returns an Order with fill details (status, filled_qty, filled_avg_price).
+        Returns a REJECTED Order if the position doesn't exist or the call fails.
 
-        Alpaca's close_position endpoint requires its *internal* symbol format:
-          get_positions returns  LINK/USD  (our canonical form, after normalisation)
-          close_position expects LINKUSD   (Alpaca's native no-slash crypto format)
-        We try the canonical form first and fall back to the no-slash form.
+        Preferred over a manual qty-based sell because:
+          • Alpaca calculates the exact qty server-side — no floating-point mismatch
+          • Works for any qty, including tiny fractional crypto remnants
+          • Idempotent: if no position exists, returns gracefully
+
+        Symbol format: Alpaca's get_positions returns LINK/USD (slash) after our
+        normalisation, but close_position expects LINKUSD (no-slash internally).
+        We try canonical form first, then fall back to the no-slash form.
         """
-        # Build list of formats to try: canonical first, then no-slash fallback
+        from .base import Order as _Order, OrderSide, OrderStatus, OrderType
+
+        # Build list of symbol formats to try
         candidates = [symbol]
         if "/" in symbol:
             candidates.append(symbol.replace("/", ""))   # LINK/USD → LINKUSD
 
+        result = _Order(symbol=symbol, side=OrderSide.SELL,
+                        qty=0.0, type=OrderType.MARKET,
+                        status=OrderStatus.REJECTED)
+
         for sym in candidates:
             try:
-                self._client.close_position(sym)
-                log.info("Alpaca close_position(%s) submitted.", sym)
-                return True
+                resp = self._client.close_position(sym)
+                result.id     = str(resp.id) if resp and resp.id else None
+                result.status = OrderStatus.PENDING
+                log.info("Alpaca close_position(%s) submitted (order %s).", sym, result.id)
+
+                # Poll once after a short delay to get the fill price
+                if result.id:
+                    time.sleep(5)
+                    try:
+                        updated = self._client.get_order_by_id(result.id)
+                        result.status = _map_alpaca_status(updated.status.value) \
+                                        if updated.status else result.status
+                        result.filled_qty       = float(updated.filled_qty or 0)
+                        result.filled_avg_price = float(updated.filled_avg_price) \
+                                                  if updated.filled_avg_price else None
+                        log.info(
+                            "close_position(%s) fill: status=%s qty=%s px=%s",
+                            sym, result.status.value,
+                            result.filled_qty, result.filled_avg_price,
+                        )
+                    except Exception as poll_err:
+                        log.warning("close_position poll failed for %s: %s", sym, poll_err)
+                return result
+
             except Exception as e:
                 err = str(e).lower()
                 if "not found" in err or "404" in err or "does not exist" in err:
-                    continue   # try next format
+                    continue   # try next symbol format
                 log.warning("close_position(%s) failed: %s", sym, e)
-                return False
+                return result   # REJECTED
 
-        # All formats returned 404 — position is already gone on broker side
+        # All formats returned 404 — already closed on broker side
         log.info("close_position(%s): no active position found — already clean.", symbol)
-        return False
+        result.status = OrderStatus.CANCELLED
+        return result
 
     def cancel_orders_for_symbol(self, symbol: str) -> int:
         """Cancel all open orders for *symbol* using a symbol-filtered query."""

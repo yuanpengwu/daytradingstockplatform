@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from ..brokers.base import BrokerBase, Order, OrderSide, OrderType, Position
+from ..brokers.base import BrokerBase, Order, OrderSide, OrderType, Position  # Order kept for place_entry
 from ..signals.aggregator import AggregatedDecision
 from ..utils.logger import get_logger
 from ..utils.notifications import notify_order_entry, notify_order_exit
@@ -173,61 +173,61 @@ class CryptoTrader:
         return True
 
     def close_position(self, pos: Position, reason: str) -> None:
-        """Cancel any pending orders, then submit a SELL to close the position.
+        """Close the full position using Alpaca's native close_position endpoint.
 
-        If the sell is not immediately filled, the position stays in tracking
-        and the next cycle will retry.
+        Using broker.close_position() instead of a qty-based sell order avoids
+        floating-point mismatches (e.g. bot sends 15.020985 but Alpaca holds
+        15.020984997, causing "available" rejection errors).  Alpaca calculates
+        the exact qty to close server-side.
         """
         sym = pos.symbol
 
-        # Cancel pending orders first — a PENDING sell from a prior cycle
-        # causes Alpaca to reject the new sell ("insufficient holdings").
+        # Cancel any pending orders first to avoid "insufficient holdings" rejection
         self.broker.cancel_orders_for_symbol(sym)
 
-        # Round to 8 dp (Alpaca's max crypto precision).
-        qty = round(abs(pos.qty), 8)
-        if qty <= 0:
-            # Ghost position: qty is too small to sell via qty-based order
-            # (e.g. 4e-09 LINK remnant).  Use Alpaca's native close_position
-            # endpoint so the position is also removed on the broker side,
-            # not just from our in-memory tracking.
+        # Ghost position (qty rounds to zero) — still call close_position so
+        # Alpaca removes it on their side, then clean up locally.
+        if round(abs(pos.qty), 8) <= 0:
             log.warning(
                 "CryptoTrader: near-zero qty (%.2e) for %s — "
-                "closing orphan on broker via close_position().",
+                "closing orphan via broker.close_position().",
                 abs(pos.qty), sym,
             )
             self.broker.close_position(sym)
             self.cleanup(sym)
             return
 
-        order = Order(
-            symbol=sym,
-            side=OrderSide.SELL,
-            qty=qty,
-            type=OrderType.MARKET,
-        )
-        result = self.broker.submit_order(order)
+        # Use broker.close_position() — avoids all qty precision issues
+        result = self.broker.close_position(sym)
 
-        if result.status.value != "filled":
+        if result.status.value not in ("filled", "pending", "cancelled"):
             log.warning(
-                "CryptoTrader: SELL %s NOT filled | status=%s reason=%s qty=%.8f "
+                "CryptoTrader: close_position(%s) status=%s reason=%s "
                 "— will retry next cycle.",
-                sym, result.status.value, reason, qty,
+                sym, result.status.value, reason,
             )
-            return  # position stays tracked; next cycle retries
+            return   # position stays tracked; next cycle retries
 
-        exit_price  = result.filled_avg_price or pos.current_price
+        if result.status.value == "cancelled":
+            # Position was already gone on the broker side (404 → cleaned)
+            log.info("CryptoTrader: %s already closed on broker — cleaning up.", sym)
+            self.cleanup(sym)
+            return
+
+        # Use fill price from result, or fall back to current market price
+        exit_price  = result.filled_avg_price or pos.current_price or pos.avg_entry_price
+        filled_qty  = result.filled_qty if result.filled_qty > 0 else abs(pos.qty)
         entry_price = self._entry_price.get(sym, pos.avg_entry_price)
-        pnl         = (exit_price - entry_price) * abs(pos.qty)
+        pnl         = (exit_price - entry_price) * filled_qty
         pnl_pct     = (exit_price - entry_price) / entry_price if entry_price else 0.0
 
         log.info(
-            "CRYPTO EXIT %s | reason=%s exit=$%.4f pnl=%+.2f (%+.2f%%)",
-            sym, reason, exit_price, pnl, pnl_pct * 100,
+            "CRYPTO EXIT %s | reason=%s exit=$%.4f qty=%.6f pnl=%+.2f (%+.2f%%)",
+            sym, reason, exit_price, filled_qty, pnl, pnl_pct * 100,
         )
         notify_order_exit(
             symbol=sym, side="sell",
-            qty=abs(pos.qty), pnl=pnl, pnl_pct=pnl_pct,
+            qty=filled_qty, pnl=pnl, pnl_pct=pnl_pct,
             reason=reason,
             entry_price=entry_price, exit_price=exit_price,
             held_since=self._entry_time.get(sym),
