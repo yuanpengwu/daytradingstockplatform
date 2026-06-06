@@ -322,7 +322,7 @@ class RiskManager:
              fires after min_hold_minutes only when at breakeven or a loss
           4. Trailing stop — fires immediately once in profit
         """
-        if position.qty <= 0:
+        if position.qty == 0:
             return False, ""
         px = position.current_price
         is_long = position.qty > 0
@@ -402,14 +402,18 @@ class RiskManager:
         # Exiting a profitable position on a fleeting signal reversal is the
         # "cut winners short" anti-pattern: it produces tiny wins while losses
         # (which hit the hard stop before the signal reverses) remain full-sized.
-        if is_long and score < -self.cfg.get("exit_threshold", 0.10):
+        exit_threshold = self.cfg.get("exit_threshold", 0.10)
+        # Long: exit when score turns bearish; Short: exit when score turns bullish.
+        reversal = (is_long and score < -exit_threshold) or \
+                   (not is_long and score > exit_threshold)
+        if reversal:
             if pnl_pct > 0:
-                # Any unrealized profit → suppress signal reversal entirely.
-                # Let the trailing stop protect gains instead of cutting at pennies.
+                # Profitable position: let trailing stop protect gains
+                # instead of cutting on a fleeting signal flip.
                 log.debug(
-                    "Signal reversed for %s but position is in profit (%.2f%%) "
-                    "— suppressing reversal exit, trailing stop will handle it.",
-                    position.symbol, pnl_pct * 100,
+                    "Signal reversed for %s [%s] but in profit (%.2f%%) "
+                    "— suppressing, trailing stop will handle it.",
+                    position.symbol, "long" if is_long else "short", pnl_pct * 100,
                 )
             elif held_since is None:
                 return True, "signal reversed"
@@ -425,10 +429,17 @@ class RiskManager:
                     )
 
         # 4. Trailing stop.
-        if trail_high is not None and trail_high > position.avg_entry_price:
-            drawdown = (trail_high - position.current_price) / trail_high
-            if drawdown >= self.trail_pct:
-                return True, f"trailing stop ({drawdown*100:.2f}% off peak)"
+        # Long : trail_high = max price seen → fires when price drops trail_pct% off peak
+        # Short: trail_high = min price seen → fires when price rallies trail_pct% off trough
+        if trail_high is not None:
+            if is_long and trail_high > position.avg_entry_price:
+                drawdown = (trail_high - position.current_price) / trail_high
+                if drawdown >= self.trail_pct:
+                    return True, f"trailing stop ({drawdown*100:.2f}% off peak)"
+            elif not is_long and trail_high < position.avg_entry_price:
+                rally = (position.current_price - trail_high) / trail_high
+                if rally >= self.trail_pct:
+                    return True, f"trailing stop ({rally*100:.2f}% off trough)"
 
         # 5. Stale position exit — no meaningful movement after N minutes.
         #    Catches positions that just sit at entry going nowhere.  Hard

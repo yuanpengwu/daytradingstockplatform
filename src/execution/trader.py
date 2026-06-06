@@ -545,9 +545,20 @@ class Trader:
                 )
 
     def _update_trailing_high(self, pos: Position) -> None:
+        """Update the trailing watermark for stop calculation.
+
+        Long  (qty > 0): track the MAXIMUM price — trail fires on a drop.
+        Short (qty < 0): track the MINIMUM price — trail fires on a rally.
+        """
         cur = pos.current_price or self.broker.get_last_price(pos.symbol)
         if cur <= 0:
             return
         prev = self._trail_high.get(pos.symbol, pos.avg_entry_price)
-        if cur > prev:
-            self._trail_high[pos.symbol] = cur
+        if pos.qty >= 0:
+            # Long: keep the highest price seen
+            if cur > prev:
+                self._trail_high[pos.symbol] = cur
+        else:
+            # Short: keep the lowest price seen (trough)
+            if cur < prev:
+                self._trail_high[pos.symbol] = cur

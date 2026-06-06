@@ -124,7 +124,7 @@ risk:
   use_atr_stops: true
   atr_stop_multiplier: 13.0
   atr_tp_multiplier: 4.0
-  shorting_enabled: false
+  shorting_enabled: true           # enable short selling for stocks
   short_regimes:
   - trending_bear
   - high_volatility
