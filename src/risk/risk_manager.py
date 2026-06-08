@@ -416,7 +416,15 @@ class RiskManager:
                     position.symbol, "long" if is_long else "short", pnl_pct * 100,
                 )
             elif held_since is None:
-                return True, "signal reversed"
+                # Entry time unknown — position was reconciled after an engine
+                # restart and _entry_time was not persisted.  Treat as if
+                # min_hold has NOT elapsed: do not exit on signal reversal.
+                # Stop-loss / take-profit / trailing-stop still apply below.
+                log.debug(
+                    "Signal reversed for %s but entry time unknown (restart reconcile) "
+                    "— applying min_hold conservatively, keeping position.",
+                    position.symbol,
+                )
             else:
                 held_minutes = (datetime.now() - held_since).total_seconds() / 60
                 if held_minutes >= self.min_hold_minutes:

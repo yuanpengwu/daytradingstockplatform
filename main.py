@@ -30,22 +30,54 @@ from src.utils.logger import get_logger
 _ROOT = Path(__file__).resolve().parent
 
 
-def _open_status_monitor() -> None:
-    """Open a visible terminal window running the live status monitor.
+def _kill_existing_monitors() -> None:
+    """Kill any existing engine_status.py monitor processes (and their shells)."""
+    try:
+        import ctypes
+        result = subprocess.run(
+            ["wmic", "process", "where",
+             "CommandLine like '%engine_status%' and Name='python.exe'",
+             "get", "ProcessId", "/format:csv"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            parts = line.strip().split(",")
+            if len(parts) >= 2 and parts[-1].strip().isdigit():
+                pid = int(parts[-1].strip())
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                               capture_output=True, timeout=5)
+        # Also kill powershell wrappers hosting the monitor
+        result2 = subprocess.run(
+            ["wmic", "process", "where",
+             "CommandLine like '%engine_status%' and Name='powershell.exe'",
+             "get", "ProcessId", "/format:csv"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result2.stdout.strip().splitlines():
+            parts = line.strip().split(",")
+            if len(parts) >= 2 and parts[-1].strip().isdigit():
+                pid = int(parts[-1].strip())
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                               capture_output=True, timeout=5)
+    except Exception:
+        pass
 
-    Called once at startup regardless of how main.py was launched
-    (Task Scheduler, start_bot.ps1, or manual command line).
-    The window is titled 'DayTradingBot Monitor' so it's easy to find.
-    If a monitor window is already open it just opens a second one —
-    harmless, the user can close the extra.
+
+def _open_status_monitor() -> None:
+    """Open exactly one terminal window running the live status monitor.
+
+    Kills any pre-existing monitor windows first so only one instance ever
+    runs at a time, even after repeated engine restarts.
     """
     import platform
     if platform.system() != "Windows":
-        return   # Linux / macOS: skip (run engine_status.py manually)
+        return   # Linux / macOS: run engine_status.py manually
 
     monitor_script = _ROOT / "scripts" / "engine_status.py"
     if not monitor_script.exists():
         return
+
+    _kill_existing_monitors()
 
     try:
         subprocess.Popen(

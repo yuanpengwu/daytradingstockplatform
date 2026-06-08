@@ -159,6 +159,51 @@ def get_crypto_status_json() -> dict:
         return {}
 
 
+def get_crypto_prices() -> dict:
+    """Fetch live crypto prices and 1h change from Alpaca."""
+    try:
+        import os
+        from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+        from alpaca.data.requests import CryptoBarsRequest, CryptoLatestTradeRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+        from datetime import timedelta, timezone
+        key    = os.getenv("ALPACA_API_KEY")
+        secret = os.getenv("ALPACA_API_SECRET")
+        if not (key and secret):
+            return {}
+        client = CryptoHistoricalDataClient(key, secret)
+
+        symbols = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "LINK/USD"]
+        # Fetch last 2 hours of 1h bars for price + change
+        req = CryptoBarsRequest(
+            symbol_or_symbols=symbols,
+            timeframe=TimeFrame(1, TimeFrameUnit.Hour),
+            start=datetime.now(timezone.utc) - timedelta(hours=3),
+        )
+        resp = client.get_crypto_bars(req)
+        df   = resp.df
+        if df is None or df.empty:
+            return {}
+
+        out = {}
+        for sym in symbols:
+            try:
+                sym_df = df.loc[sym] if sym in df.index.get_level_values(0) \
+                         else df.droplevel(0)
+                if len(sym_df) >= 2:
+                    cur  = float(sym_df["close"].iloc[-1])
+                    prev = float(sym_df["close"].iloc[-2])
+                    pct  = (cur - prev) / prev * 100 if prev else 0.0
+                    out[sym] = {"price": cur, "change_1h_pct": pct}
+                elif len(sym_df) == 1:
+                    out[sym] = {"price": float(sym_df["close"].iloc[-1]), "change_1h_pct": 0.0}
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return {}
+
+
 def get_positions_from_alpaca():
     try:
         from alpaca.trading.client import TradingClient
@@ -242,14 +287,8 @@ def get_log_events(n: int = 14) -> list[str]:
     if not p.exists():
         return ["(log not found)"]
     try:
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()[-800:]
-        kw = ("ENTRY", "EXIT", "SKIP", "CRYPTO ENTRY", "CRYPTO EXIT",
-              "stop_loss", "take_profit", "trailing_stop", "signal_reversed",
-              "eod_flatten", "partial_profit", "reconciled",
-              "ERROR", "WARNING", "CryptoTrader", "Alpaca order failed",
-              "SELL", "BUY", "filled")
-        events = [l for l in lines if any(k in l for k in kw)]
-        return events[-n:]
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        return lines[-n:]
     except Exception:
         return ["(could not read log)"]
 
@@ -293,6 +332,7 @@ def render() -> str:
     log_events              = get_log_events(14)
     st                      = get_status_json()
     cst                     = get_crypto_status_json()
+    crypto_prices           = get_crypto_prices()
 
     lines: list[str] = []
 
@@ -431,16 +471,23 @@ def render() -> str:
         lines.append(box_row(dim("  Waiting for first crypto cycle…")))
     else:
         action_order = {"BUY": 0, "SELL": 1, "HOLD": 2}
-        for d in sorted(crypto_decisions,
-                        key=lambda d: (action_order.get(d.get("action","HOLD"),2),
-                                       -abs(d.get("score",0)))):
+        sorted_dec = sorted(crypto_decisions,
+                            key=lambda d: (action_order.get(d.get("action","HOLD"),2),
+                                           -abs(d.get("score",0))))
+
+        # Normalize bars to actual score range so small moves look meaningful
+        all_scores = [abs(d.get("score", 0)) for d in sorted_dec]
+        max_abs    = max(all_scores) if all_scores else 1.0
+        scale      = max_abs if max_abs > 0.05 else 1.0   # fallback to full scale
+
+        for d in sorted_dec:
             sym    = d.get("symbol", "?")
             score  = d.get("score", 0.0)
             conf   = d.get("confidence", 0.0)
             action = d.get("action", "HOLD")
             display = d.get("raw_scores") or d.get("components", {})
-            top3    = sorted(display.items(), key=lambda x: -abs(x[1]))[:2]
-            top3_str = "  ".join(f"{k}={v:+.3f}" for k, v in top3)
+            top2    = sorted(display.items(), key=lambda x: -abs(x[1]))[:2]
+            top2_str = "  ".join(f"{k}={v:+.3f}" for k, v in top2)
 
             if action == "BUY":
                 act_col = green(f"[{action:<4}]")
@@ -449,18 +496,31 @@ def render() -> str:
             else:
                 act_col = dim(f"[{action:<4}]")
 
-            bar_len   = min(16, int(abs(score) * 16))
-            bar_fill  = ("█" * bar_len).ljust(16, "░")
+            # Bar normalized to current score range (shows relative strength)
+            bar_len  = min(12, int(abs(score) / scale * 12))
+            bar_fill = ("█" * bar_len).ljust(12, "░")
             score_col = green if score >= 0 else red
             sign_ch   = "▲" if score >= 0 else "▼"
 
-            # Show whether this pair is currently held
-            held = any(p["symbol"] == sym for p in positions if p.get("is_crypto"))
-            tag  = cyan(" [HELD]") if held else ""
+            # Live price + 1h change
+            px_info = crypto_prices.get(sym, {})
+            price   = px_info.get("price", 0.0)
+            chg_pct = px_info.get("change_1h_pct", 0.0)
+            if price > 0:
+                px_str  = _fmt_price(price, sym)
+                chg_col = green if chg_pct >= 0 else red
+                chg_str = chg_col(f"{chg_pct:+.2f}%/1h")
+                px_part = f"{px_str} {chg_str}"
+            else:
+                px_part = dim("no price")
 
-            row = (f"  {act_col} {bold(sym):<10}{tag}  "
-                   f"{sign_ch} {score_col(f'{score:+.3f}')}  {dim(bar_fill)}  "
-                   f"conf={conf:.0%}  {dim(top3_str)}")
+            # [HELD] tag
+            held = any(p["symbol"] == sym for p in positions if p.get("is_crypto"))
+            tag  = cyan("[H]") if held else "   "
+
+            row = (f"  {tag} {act_col} {bold(sym):<10}  "
+                   f"{sign_ch} {score_col(f'{score:+.3f}')} {dim(bar_fill)}  "
+                   f"conf={conf:.0%}  {px_part}  {dim(top2_str)}")
             lines.append(box_row(row))
 
     # ── Today's trades ────────────────────────────────────────────────────────

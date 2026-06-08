@@ -179,9 +179,14 @@ class CryptoEngine:
                 self.trader.manage_position(pos)
 
         # ── Pass 1: evaluate signals for ALL pairs (for dashboard visibility) ──
+        # Collect ALL signals first, then aggregate once — same pattern as the
+        # stock engine. Calling aggregate() per ticker breaks dead-signal
+        # detection (counters flip within a single cycle, causing false recovery
+        # messages on every iteration).
         equity      = self.broker.get_equity()
         all_decisions: dict = {}
         bars_cache:  dict = {}
+        all_signals: list  = []
 
         for sym in self.universe.tickers:
             bars = self.market.get_bars(sym)
@@ -191,17 +196,28 @@ class CryptoEngine:
             try:
                 tech_sig = self._tech.evaluate(sym, bars)
                 ml_sig   = self._ml.evaluate(sym, bars, tech_signal=tech_sig)
-                sigs     = [s for s in (tech_sig, ml_sig)
-                            if s is not None and s.confidence > 0]
-                if sigs:
-                    dec = self._agg.aggregate(sigs).get(sym)
-                    if dec is not None:
-                        all_decisions[sym] = dec
+                for s in (tech_sig, ml_sig):
+                    if s is not None and s.confidence > 0:
+                        all_signals.append(s)
             except Exception as e:
                 log.debug("CryptoEngine signal eval %s: %s", sym, e)
 
+        if all_signals:
+            all_decisions = self._agg.aggregate(all_signals)
+
         # Write crypto signals to crypto_status.json for the dashboard
         write_crypto_decisions("status.json", all_decisions)
+
+        # Per-cycle heartbeat — keeps the LIVE LOG alive between ML cache refreshes
+        # (ML scores are cached for 30 min; without this the log goes silent).
+        held = list(self.trader.tracked_symbols)
+        dec_parts = []
+        for sym in self.universe.tickers:
+            d = all_decisions.get(sym)
+            if d:
+                tag = "[H] " if sym in held else ""
+                dec_parts.append(f"{tag}{sym} {d.action} {d.score:+.2f}")
+        log.info("CryptoEngine cycle | %s", "  |  ".join(dec_parts) if dec_parts else "no signals")
 
         # ── Pass 2: place new entries for untracked pairs ─────────────────────
         crypto_exposure  = sum(pos.market_value for pos in positions.values())

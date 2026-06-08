@@ -8,8 +8,9 @@ from ..utils.trade_history import TradeHistory
 
 # Resolve the project root regardless of the CWD at startup
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_TRADES_PATH  = _PROJECT_ROOT / "trades.json"
-_STATUS_PATH  = _PROJECT_ROOT / "status.json"
+_TRADES_PATH        = _PROJECT_ROOT / "trades.json"
+_STATUS_PATH        = _PROJECT_ROOT / "status.json"
+_CRYPTO_STATUS_PATH = _PROJECT_ROOT / "crypto_status.json"
 
 app = FastAPI(title="DayTradingBot API")
 
@@ -32,7 +33,13 @@ def get_status(response: Response):
     if not _STATUS_PATH.exists():
         return {"error": "No status yet. Ensure main.py is running."}
     with open(_STATUS_PATH) as f:
-        return json.load(f)
+        data = json.load(f)
+    if _CRYPTO_STATUS_PATH.exists():
+        with open(_CRYPTO_STATUS_PATH) as f:
+            crypto = json.load(f)
+        data["crypto_decisions"] = crypto.get("crypto_decisions", [])
+        data["crypto_updated_at"] = crypto.get("updated_at")
+    return data
 
 class SellRequest(BaseModel):
     reason: str = "Manual dashboard emergency sell"
