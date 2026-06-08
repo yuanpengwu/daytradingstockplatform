@@ -87,6 +87,18 @@ class Trader:
         #    Engine reads this after manage_open_positions and registers bans.
         self.recent_stop_losses: set = set()
 
+        # Restore entry times from transactions.json so min_hold_minutes is
+        # correctly applied to positions that were open before a restart.
+        if trade_history is not None:
+            recovered = trade_history.get_latest_entry_times()
+            if recovered:
+                self._entry_time.update(recovered)
+                log.info(
+                    "Trader: restored entry times for %d symbol(s) from transactions.json: %s",
+                    len(recovered),
+                    {s: t.strftime("%Y-%m-%d %H:%M") for s, t in recovered.items()},
+                )
+
     # ---------- daily reset ----------
     def begin_day(self, day_str: Optional[str] = None) -> None:
         """Reset per-day state. Must be called by the engine at day start.

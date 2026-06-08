@@ -29,6 +29,8 @@ interface StatusData {
   kill_switch: boolean;
   positions: Position[];
   decisions: Decision[];
+  crypto_decisions?: Decision[];
+  crypto_updated_at?: string;
   error?: string;
 }
 
@@ -238,6 +240,52 @@ function App() {
           )}
         </div>
       </div>
+
+      {data?.crypto_decisions !== undefined && (
+        <div className="panel glass" style={{margin: '0 0 24px 0'}}>
+          <h2>
+            Crypto Signal Scores
+            {data.crypto_updated_at && (
+              <span style={{fontSize:'12px',color:'#8b8f98',fontWeight:'normal',marginLeft:'12px'}}>
+                updated {new Date(data.crypto_updated_at).toLocaleTimeString()}
+              </span>
+            )}
+          </h2>
+          {!data.crypto_decisions.length ? (
+            <p className="muted">No crypto signals this cycle.</p>
+          ) : (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Score</th>
+                  <th>Conf</th>
+                  <th>Tech</th>
+                  <th>ML</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.crypto_decisions.sort((a, b) => b.score - a.score).map(d => {
+                  const c = d.components || {};
+                  const scoreClass = d.score >= 0.35 ? 'pos' : d.score <= -0.35 ? 'neg' : '';
+                  const fmt = (v?: number) => v !== undefined ? (v > 0 ? '+' : '') + v.toFixed(3) : '—';
+                  return (
+                    <tr key={d.symbol}>
+                      <td><strong>{d.symbol}</strong></td>
+                      <td className={scoreClass}><strong>{d.score > 0 ? '+' : ''}{d.score.toFixed(3)}</strong></td>
+                      <td>{d.confidence.toFixed(2)}</td>
+                      <td className={c.technical > 0 ? 'pos' : c.technical < 0 ? 'neg' : ''}>{fmt(c.technical)}</td>
+                      <td className={c.ml > 0 ? 'pos' : c.ml < 0 ? 'neg' : ''}>{fmt(c.ml)}</td>
+                      <td><span className={`badge ${d.action.toLowerCase()}`}>{d.action}</span></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
 
       <div className="panel glass" style={{margin: '0 0 24px 0'}}>
         <h2>Win Rate</h2>

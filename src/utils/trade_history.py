@@ -181,6 +181,32 @@ class TradeHistory:
             pnl, pnl_pct * 100, trade.won, reason,
         )
 
+    def get_latest_entry_times(self) -> dict:
+        """Return {symbol: datetime} of the most-recent entry transaction per symbol.
+
+        Used by Trader.__init__ to restore _entry_time after an engine restart so
+        the min_hold_minutes gate isn't bypassed for reconciled positions.
+        """
+        if not self._tx_path.exists():
+            return {}
+        try:
+            with open(self._tx_path, "r", encoding="utf-8") as f:
+                rows = json.load(f)
+            result: dict = {}
+            for row in rows:
+                if row.get("type") == "entry":
+                    sym = row.get("symbol")
+                    ts_str = row.get("timestamp")
+                    if sym and ts_str:
+                        try:
+                            result[sym] = datetime.fromisoformat(ts_str)
+                        except Exception:
+                            pass
+            return result
+        except Exception as e:
+            log.warning("Could not read entry times from transactions.json: %s", e)
+            return {}
+
     def win_rate_summary(self) -> dict:
         """Return win-rate stats for every time window."""
         return {label: self._stats_for_days(days) for label, days in _WINDOWS.items()}
