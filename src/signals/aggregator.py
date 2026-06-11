@@ -47,7 +47,7 @@ class AggregatedDecision:
     symbol: str
     score: float                  # in [-1, +1]
     confidence: float             # in [0, 1]
-    components: Dict[str, float]  # per-source weighted contribution (weight × conf × score)
+    components: Dict[str, float]  # per-source normalized contribution to final score; Σvalues == pre-clip score
     raw_scores: Dict[str, float]  # per-source raw signal score in [-1, +1] — for display
     enter_long: float = 0.35      # effective threshold (may be scaled down)
     enter_short: float = -0.35    # effective threshold (may be scaled down)
@@ -233,7 +233,7 @@ class SignalAggregator:
                 w   = effective_weights.get(s.source.value, 0.0)
                 eff = w * s.confidence          # zero-confidence signals contribute nothing
                 contribution = eff * s.score
-                comp[s.source.value] = contribution
+                comp[s.source.value] = comp.get(s.source.value, 0.0) + contribution
                 raw[s.source.value]  = s.score  # raw score before weighting
                 num += contribution
                 den += eff
@@ -247,8 +247,18 @@ class SignalAggregator:
             # in exactly the conditions where shorts are most valuable.
             if raw_score >= 0:
                 score = raw_score * market_multiplier
+                macro_scale = market_multiplier
             else:
-                score = raw_score / max(market_multiplier, 0.10)  # avoid div-by-zero
+                _mdenom = max(market_multiplier, 0.10)
+                score = raw_score / _mdenom
+                macro_scale = 1.0 / _mdenom
+
+            # Normalise comp so that Σ(comp.values()) == score (pre-clip).
+            # This makes each entry the source's direct contribution to the
+            # final score, reconcilable with what the DECISION log prints.
+            if den > 0:
+                _norm = macro_scale / den
+                comp = {k: v * _norm for k, v in comp.items()}
 
             # Confidence = (weight coverage) × (cross-source agreement factor).
             #
@@ -267,10 +277,13 @@ class SignalAggregator:
             weight_coverage = den / total_weight_denom if total_weight_denom > 0 else 0.0
 
             # Gather sources that have a meaningful weight (≥5%) and actual opinion.
+            # Use the raw signal score (not the weighted contribution) as the
+            # opinion threshold so that the bar is the same regardless of the
+            # source's configured weight or its confidence this cycle.
             opinionated = [
                 (src, c_val)
                 for src, c_val in comp.items()
-                if effective_weights.get(src, 0.0) >= 0.05 and abs(c_val) > 1e-4
+                if effective_weights.get(src, 0.0) >= 0.05 and abs(raw.get(src, 0.0)) > 0.05
             ]
             if len(opinionated) >= 2:
                 signal_dir = float(np.sign(raw_score)) if raw_score != 0 else 0.0

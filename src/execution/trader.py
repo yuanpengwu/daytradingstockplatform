@@ -1,7 +1,9 @@
 """Order placement + open-position lifecycle management."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from ..brokers.base import BrokerBase, Order, OrderSide, OrderType, Position
@@ -13,6 +15,10 @@ from ..utils.notifications import notify, notify_order_entry, notify_order_exit
 from ..utils.trade_history import TradeHistory
 
 log = get_logger(__name__)
+
+# Per-position state (stops, partial-exit progress, regime params) persisted
+# across restarts so ATR stops aren't silently replaced by the wider % fallbacks.
+_STATE_PATH = Path(__file__).resolve().parents[2] / "trader_state.json"
 
 
 class Trader:
@@ -99,6 +105,63 @@ class Trader:
                     {s: t.strftime("%Y-%m-%d %H:%M") for s, t in recovered.items()},
                 )
 
+        # Restore stops / partial-exit progress / regime params from the last run.
+        self._load_state()
+
+    # ---------- state persistence ----------
+    def _save_state(self) -> None:
+        """Persist per-position stops, partial progress, and regime params."""
+        try:
+            state = {}
+            for sym, (stop, tp) in self._stops.items():
+                state[sym] = {
+                    "stop": stop,
+                    "tp": tp,
+                    "entry_qty": self._entry_qty.get(sym),
+                    "partial_exits": self._partial_exits.get(sym, 0),
+                    "regime_params": self._regime_params.get(sym),
+                    "entry_time": (
+                        self._entry_time[sym].isoformat()
+                        if sym in self._entry_time else None
+                    ),
+                }
+            _STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        except Exception as e:
+            log.warning("Could not save trader state: %s", e)
+
+    def _load_state(self) -> None:
+        """Restore per-position state saved by a previous run.
+
+        Stale entries (positions closed while the bot was down) are harmless:
+        stops are only consulted while the broker reports the position, and a
+        fresh entry overwrites every per-symbol dict.
+        """
+        if not _STATE_PATH.exists():
+            return
+        try:
+            state = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning("Could not load trader state: %s", e)
+            return
+        for sym, s in state.items():
+            if s.get("stop") is not None or s.get("tp") is not None:
+                self._stops[sym] = (s.get("stop"), s.get("tp"))
+            if s.get("entry_qty"):
+                self._entry_qty[sym] = float(s["entry_qty"])
+            self._partial_exits[sym] = int(s.get("partial_exits") or 0)
+            if s.get("regime_params"):
+                self._regime_params[sym] = s["regime_params"]
+            if sym not in self._entry_time and s.get("entry_time"):
+                try:
+                    self._entry_time[sym] = datetime.fromisoformat(s["entry_time"])
+                except ValueError:
+                    pass
+        if state:
+            log.info(
+                "Trader: restored stops/partial state for %d symbol(s): %s",
+                len(state), list(state),
+            )
+
     # ---------- daily reset ----------
     def begin_day(self, day_str: Optional[str] = None) -> None:
         """Reset per-day state. Must be called by the engine at day start.
@@ -159,7 +222,7 @@ class Trader:
                 held_since=held_since,
             )
             if should_exit:
-                self._close_position(existing, reason)
+                self._close_position(existing, reason, exit_scores=dec.raw_scores)
             return
 
         # ── Filter 1: dynamic exclusion + per-symbol daily loss cap ──────────
@@ -298,6 +361,7 @@ class Trader:
                 )
             else:
                 self._regime_params.pop(dec.symbol, None)
+            self._save_state()
             if self.trade_history is not None:
                 self.trade_history.log_entry(
                     symbol=dec.symbol,
@@ -322,6 +386,7 @@ class Trader:
                 take_profit=rd.take_profit,
                 regime_params=regime_params,
                 enter_threshold=dec.enter_long if is_buy else dec.enter_short,
+                position_size_info=rd.position_info,
                 channels=self.notify_channels,
             )
 
@@ -350,7 +415,8 @@ class Trader:
                 held_since=held_since,
             )
             if should_exit:
-                self._close_position(pos, reason)
+                d = aggregated.get(sym)
+                self._close_position(pos, reason, exit_scores=d.raw_scores if d else None)
 
     def flatten_all(self, reason: str = "end-of-day flatten") -> None:
         for pos in self.broker.get_stock_positions().values():
@@ -404,6 +470,7 @@ class Trader:
             if sell_qty >= 1:
                 self._execute_partial_exit(sym, sell_qty, "partial_profit_1", pos.avg_entry_price)
                 self._partial_exits[sym] = 1
+                self._save_state()
                 return True
 
         elif partial_level == 1 and pnl_pct >= pp2_pct:
@@ -411,6 +478,7 @@ class Trader:
             if sell_qty >= 1:
                 self._execute_partial_exit(sym, sell_qty, "partial_profit_2", pos.avg_entry_price)
                 self._partial_exits[sym] = 2
+                self._save_state()
                 return True
 
         return False
@@ -469,7 +537,7 @@ class Trader:
             log.warning("Partial exit %s qty=%g did not fill (status=%s).", symbol, qty, result.status)
 
     # ---------- full close ----------
-    def _close_position(self, position: Position, reason: str) -> None:
+    def _close_position(self, position: Position, reason: str, exit_scores: Optional[dict] = None) -> None:
         side = OrderSide.SELL if position.qty > 0 else OrderSide.BUY
         order = Order(
             symbol=position.symbol,
@@ -487,6 +555,8 @@ class Trader:
                 (exit_price - position.avg_entry_price) / position.avg_entry_price
                 if position.avg_entry_price else 0.0
             )
+            if position.qty < 0:  # short: profit when exit is below entry
+                realized_pnl_pct = -realized_pnl_pct
             self.risk.record_day_trade()
 
             # ── Per-symbol loss streak tracking + performance recorder ────────
@@ -499,7 +569,10 @@ class Trader:
                     self._symbol_daily_losses.get(position.symbol, 0) + 1
                 )
                 # Flag stop-loss exits for next-day cooloff (engine reads this).
-                if "stop_loss" in reason or "breakeven_stop" in reason:
+                # Reasons come from RiskManager.check_exit as free text:
+                # "stop price hit (…)", "stop loss hit (…)", "breakeven stop hit (…)".
+                if ("stop price hit" in reason or "stop loss hit" in reason
+                        or "breakeven stop" in reason):
                     self.recent_stop_losses.add(position.symbol)
                 log.debug(
                     "Loss streak for %s: %d consecutive.",
@@ -519,6 +592,7 @@ class Trader:
             self._partial_exits.pop(position.symbol, None)
             self._entry_qty.pop(position.symbol, None)
             self._regime_params.pop(position.symbol, None)
+            self._save_state()
 
             notify_order_exit(
                 symbol=position.symbol,
@@ -530,6 +604,7 @@ class Trader:
                 entry_price=position.avg_entry_price,
                 exit_price=exit_price,
                 held_since=held_since,
+                exit_scores=exit_scores,
                 channels=self.notify_channels,
             )
             if self.trade_history is not None:

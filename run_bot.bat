@@ -1,9 +1,15 @@
 @echo off
 REM ============================================================
-REM  DayTradingBot launcher - runs the bot against Alpaca paper.
-REM  Use this with Windows Task Scheduler, or just double-click it.
-REM  The bot self-gates to market hours (9:30-4:00 ET); outside
-REM  the session it simply sleeps, so it's safe to leave running.
+REM  DayTradingBot launcher — used by Windows Task Scheduler.
+REM
+REM  Routes through scripts\market_runner.py which enforces:
+REM    - Single-instance guard  (one engine at a time via PID lockfile)
+REM    - Main-branch check      (aborts if not on 'main')
+REM    - NYSE holiday gate      (no-op on weekends / holidays)
+REM    - Auto-start at 9:20 ET, auto-stop at 4:05 ET
+REM
+REM  Do NOT bypass market_runner by calling main.py directly —
+REM  that skips all safety checks and can launch duplicate engines.
 REM ============================================================
 cd /d "%~dp0"
 
@@ -13,11 +19,9 @@ if not exist venv (
     exit /b 1
 )
 
-echo Starting DayTradingBot on Alpaca paper account...
-echo Press Ctrl+C to stop.
-venv\Scripts\python.exe main.py --broker alpaca
+echo Starting DayTradingBot via market_runner...
+venv\Scripts\python.exe scripts\market_runner.py
 
-REM If the bot exits (error or Ctrl+C), keep the window open so you can read why.
 echo.
-echo Bot stopped.
+echo market_runner exited.
 pause

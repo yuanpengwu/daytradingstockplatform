@@ -6,13 +6,16 @@ Claude Code scheduled task.  It handles:
 
   - NYSE holiday detection  (US public holidays + exchange closures)
   - DST-aware US/Eastern time  (via zoneinfo — stdlib since Python 3.9)
-  - Engine start via scripts/start_bot.ps1
-  - Engine stop  via scripts/stop_bot.ps1 at 4:05 PM ET
+  - Single-instance lock      (prevents duplicate engine launches)
+  - Branch verification       (aborts unless working tree is on 'main')
+  - Engine start at 9:20 AM ET
+  - Engine stop  at 4:05 PM ET
   - Logging to logs/market_runner.log
 
 Usage
 -----
   python scripts/market_runner.py
+  (or via run_bot.bat which calls this script through the venv)
 
 Schedule
 --------
@@ -21,17 +24,22 @@ Schedule
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ROOT   = Path(__file__).resolve().parent.parent
 LOGS   = ROOT / "logs"
 LOGS.mkdir(exist_ok=True)
+
+# Single-instance lockfile — stores the PID of the running market_runner so
+# any second invocation can detect and exit rather than spawn a second engine.
+LOCK_FILE = ROOT / ".market_runner.lock"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,6 +109,111 @@ def _wait_until(target_hour: int, target_min: int) -> None:
         time.sleep(min(remaining, 30))
 
 
+# ── Single-instance lock ──────────────────────────────────────────────────────
+
+def _acquire_lock() -> bool:
+    """Acquire the single-instance lock.
+
+    Returns True  if this process successfully took the lock.
+    Returns False if another market_runner is still alive (duplicate detected).
+    If the lock file exists but the recorded PID is dead, the stale file is
+    silently overwritten (handles crash-without-cleanup and machine restarts).
+    """
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            # On Windows, tasklist returns the process entry if it is alive.
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if f'"{pid}"' in result.stdout:
+                return False   # process is alive → another instance is running
+            log.debug("Stale lock (PID %d is dead) — overwriting.", pid)
+        except Exception as exc:
+            log.debug("Could not inspect lock file (%s) — overwriting.", exc)
+
+    LOCK_FILE.write_text(str(os.getpid()))
+    return True
+
+
+def _release_lock() -> None:
+    """Remove the lockfile.  Safe to call even if the file is absent."""
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except Exception as exc:
+        log.debug("Could not remove lock file: %s", exc)
+
+
+# ── Branch verification ───────────────────────────────────────────────────────
+
+def _verify_main_branch() -> bool:
+    """Return True only when the working tree is on the 'main' branch.
+
+    Running on a feature branch is almost always a mistake — it means
+    development code hits the live account.  market_runner does NOT auto-
+    checkout main to avoid silently discarding in-progress work; the fix is
+    manual: `git checkout main` then restart the bot.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=ROOT, capture_output=True, text=True, timeout=10,
+        )
+        branch = result.stdout.strip()
+        if branch == "main":
+            log.info("Branch check passed: on 'main'.")
+            return True
+        log.error(
+            "ABORT: working tree is on branch %r, not 'main'. "
+            "Run `git checkout main` and restart market_runner.",
+            branch,
+        )
+        return False
+    except Exception as exc:
+        log.warning("Branch check failed (%s) — proceeding without verification.", exc)
+        return True   # don't abort if git itself is broken; just warn
+
+
+# ── Git status report ─────────────────────────────────────────────────────────
+
+def _log_git_status() -> str:
+    """Fetch remote refs and report current commit vs origin/main.
+
+    Does NOT reset or pull — local uncommitted changes and ahead-of-origin
+    commits are preserved.  A warning is logged if origin/main has commits
+    that aren't yet merged locally.
+    """
+    try:
+        subprocess.run(
+            ["git", "fetch", "--quiet", "origin", "main"],
+            cwd=ROOT, capture_output=True, text=True, timeout=20,
+        )
+        commit = subprocess.run(
+            ["git", "log", "-1", "--format=%h %s"],
+            cwd=ROOT, capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        behind_out = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            cwd=ROOT, capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        behind_n = int(behind_out) if behind_out.isdigit() else 0
+        if behind_n:
+            log.warning(
+                "Running commit: %s  (%d commit(s) behind origin/main — "
+                "consider `git pull` before tomorrow's session)",
+                commit, behind_n,
+            )
+        else:
+            log.info("Running commit: %s  (up to date with origin/main)", commit)
+        return commit
+    except Exception as exc:
+        log.warning("git status check failed (%s) — continuing.", exc)
+        return "unknown"
+
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+
 def _run_ps(script_name: str) -> None:
     """Run a PowerShell script from the scripts/ directory."""
     ps_path = ROOT / "scripts" / script_name
@@ -115,32 +228,12 @@ def _run_ps(script_name: str) -> None:
         log.warning("PS %s stderr: %s", script_name, result.stderr.strip())
 
 
-def _git_pull_latest() -> str:
-    """Log the current git commit (do NOT reset — local commits may be ahead of origin).
-
-    We previously did `git reset --hard origin/main` which wiped unpushed
-    local commits.  Now we just report the HEAD commit so we can verify
-    which code is running without destroying anything.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "log", "-1", "--format=%h %s"],
-            cwd=ROOT, capture_output=True, text=True, timeout=10,
-        )
-        commit_line = result.stdout.strip()
-        log.info("Running commit: %s", commit_line)
-        return commit_line
-    except Exception as e:
-        log.warning("git log failed (%s).", e)
-        return "unknown"
-
-
 def _clear_pycache() -> None:
-    """Delete all __pycache__ dirs so Python re-compiles from the pulled .py files."""
+    """Delete all __pycache__ dirs so Python re-compiles from the current .py files."""
+    import shutil
     count = 0
     for cache_dir in ROOT.rglob("__pycache__"):
         try:
-            import shutil
             shutil.rmtree(cache_dir)
             count += 1
         except Exception:
@@ -149,7 +242,7 @@ def _clear_pycache() -> None:
 
 
 def _kill_old_engine() -> None:
-    """Kill any stale main.py processes from a previous session."""
+    """Kill any stale main.py processes left over from a previous session."""
     try:
         result = subprocess.run(
             ["wmic", "process", "where", "CommandLine like '%main.py%'",
@@ -166,9 +259,11 @@ def _kill_old_engine() -> None:
                 killed += 1
         if killed:
             log.info("Killed %d stale engine process(es).", killed)
-    except Exception as e:
-        log.debug("Kill-old-engine: %s", e)
+    except Exception as exc:
+        log.debug("Kill-old-engine: %s", exc)
 
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     today_et = et_now().date()
@@ -178,67 +273,82 @@ def main() -> None:
         log.info("Not a trading day (%s) — exiting.", today_et)
         return
 
-    # ── Wait until 9:20 AM ET (engine startup + model training buffer) ────────
-    _wait_until(9, 20)
-
-    # ── Step 1: Kill any stale engine from a previous session ─────────────────
-    _kill_old_engine()
-    time.sleep(2)
-
-    # ── Step 2: Pull latest code + clear stale bytecode ───────────────────────
-    commit = _git_pull_latest()
-    _clear_pycache()
-    log.info("Code ready. Commit: %s", commit)
-
-    # ── Step 3: Start engine (foreground process, output to log files) ────────
-    log.info("Starting engine …")
-    PYTHON = sys.executable
-    engine_proc = subprocess.Popen(
-        [PYTHON, str(ROOT / "main.py"), "--broker", "alpaca"],
-        cwd=str(ROOT),
-        stdout=open(ROOT / "logs" / "bot_stdout.log", "a"),
-        stderr=open(ROOT / "logs" / "bot_err.log", "a"),
-    )
-    log.info("Engine started (PID %d).", engine_proc.pid)
-
-    # Note: the status monitor is opened automatically by main.py on startup.
-    # No need to open it here — main.py always does it regardless of launch path.
-
-    # ── Step 5: Wait until 4:05 PM ET then stop ───────────────────────────────
-    now = et_now()
-    close = now.replace(hour=16, minute=5, second=0, microsecond=0)
-    if close <= now:
-        log.warning("Already past 4:05 PM ET — stopping engine immediately.")
-    else:
-        wait_secs = (close - now).total_seconds()
-        log.info("Engine will run for %.1f hours (until 4:05 PM ET).", wait_secs / 3600)
-        # Poll every minute so we can detect early crash
-        while et_now() < close:
-            if engine_proc.poll() is not None:
-                log.warning("Engine process exited early (code %d)!", engine_proc.returncode)
-                break
-            time.sleep(60)
-
-    # ── Step 6: Stop engine ────────────────────────────────────────────────────
-    log.info("Market closed — stopping engine (PID %d) …", engine_proc.pid)
-    engine_proc.terminate()
-    try:
-        engine_proc.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        engine_proc.kill()
-    log.info("Engine stopped.")
-
-    # ── EOD win-rate report → Discord ─────────────────────────────────────────
-    log.info("Generating EOD win-rate report …")
-    try:
-        import subprocess as _sp
-        _sp.run(
-            [sys.executable, str(ROOT / "scripts" / "win_rate_report.py"), "--discord"],
-            cwd=str(ROOT),
-            timeout=60,
+    # ── Single-instance guard ─────────────────────────────────────────────────
+    # If the Task Scheduler fires twice (DST edge-case, wake-from-sleep, double
+    # task registration), the second invocation detects the live PID and exits
+    # before spawning a second engine.
+    if not _acquire_lock():
+        log.warning(
+            "market_runner is already running (PID recorded in %s). "
+            "This duplicate instance is exiting to prevent a second engine launch.",
+            LOCK_FILE.name,
         )
-    except Exception as _e:
-        log.warning("Win-rate report failed: %s", _e)
+        return
+
+    try:
+        # ── Wait until 9:20 AM ET (model warm-up buffer before 9:30 open) ─────
+        _wait_until(9, 20)
+
+        # ── Branch guard ──────────────────────────────────────────────────────
+        if not _verify_main_branch():
+            return   # error already logged; lock released by finally
+
+        # ── Step 1: Kill any stale engine from a previous session ─────────────
+        _kill_old_engine()
+        time.sleep(2)
+
+        # ── Step 2: Report git status + clear stale bytecode ──────────────────
+        commit = _log_git_status()
+        _clear_pycache()
+        log.info("Code ready. Commit: %s", commit)
+
+        # ── Step 3: Start engine ──────────────────────────────────────────────
+        log.info("Starting engine …")
+        PYTHON = sys.executable
+        engine_proc = subprocess.Popen(
+            [PYTHON, str(ROOT / "main.py"), "--broker", "alpaca"],
+            cwd=str(ROOT),
+            stdout=open(ROOT / "logs" / "bot_stdout.log", "a"),
+            stderr=open(ROOT / "logs" / "bot_err.log", "a"),
+        )
+        log.info("Engine started (PID %d).", engine_proc.pid)
+
+        # ── Step 4: Wait until 4:05 PM ET then stop ───────────────────────────
+        now   = et_now()
+        close = now.replace(hour=16, minute=5, second=0, microsecond=0)
+        if close <= now:
+            log.warning("Already past 4:05 PM ET — stopping engine immediately.")
+        else:
+            wait_secs = (close - now).total_seconds()
+            log.info("Engine will run for %.1f hours (until 4:05 PM ET).", wait_secs / 3600)
+            while et_now() < close:
+                if engine_proc.poll() is not None:
+                    log.warning("Engine process exited early (code %d)!", engine_proc.returncode)
+                    break
+                time.sleep(60)
+
+        # ── Step 5: Stop engine ───────────────────────────────────────────────
+        log.info("Market closed — stopping engine (PID %d) …", engine_proc.pid)
+        engine_proc.terminate()
+        try:
+            engine_proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            engine_proc.kill()
+        log.info("Engine stopped.")
+
+        # ── Step 6: EOD win-rate report → Discord ─────────────────────────────
+        log.info("Generating EOD win-rate report …")
+        try:
+            subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "win_rate_report.py"), "--discord"],
+                cwd=str(ROOT),
+                timeout=60,
+            )
+        except Exception as exc:
+            log.warning("Win-rate report failed: %s", exc)
+
+    finally:
+        _release_lock()
 
     log.info("market_runner done.")
 

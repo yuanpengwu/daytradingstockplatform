@@ -35,6 +35,7 @@ from ..brokers.base import BrokerBase, Order, OrderSide, OrderType, Position
 from ..signals.aggregator import AggregatedDecision
 from ..utils.logger import get_logger
 from ..utils.notifications import notify_order_entry, notify_order_exit
+from ..utils.trade_history import TradeHistory
 
 log = get_logger(__name__)
 
@@ -47,7 +48,8 @@ class CryptoTrader:
     only handles signal evaluation and the main 24/7 loop.
     """
 
-    def __init__(self, broker: BrokerBase, config: dict):
+    def __init__(self, broker: BrokerBase, config: dict,
+                 trade_history: Optional[TradeHistory] = None):
         self.broker = broker
         ccfg = config.get("crypto", {})
 
@@ -57,6 +59,8 @@ class CryptoTrader:
         self._max_notional:     float = float(ccfg.get("max_position_notional",   500))
         self._short_notional:   float = float(ccfg.get("short_max_notional",      300))
         self.shorting_enabled:  bool  = bool(ccfg.get("shorting_enabled",         False))
+        _raw_max_hold = float(ccfg.get("max_hold_minutes", 0))
+        self._max_hold_minutes: Optional[float] = _raw_max_hold if _raw_max_hold > 0 else None
 
         notif_cfg = config.get("notifications", {})
         self._channels: List[str] = list(notif_cfg.get("channels", ["console"]))
@@ -69,6 +73,22 @@ class CryptoTrader:
         self._stops:            Dict[str, Tuple[float, float]] = {}   # (stop_price, tp_price)
         self._entry_time:       Dict[str, datetime]          = {}
         self._entry_price:      Dict[str, float]             = {}
+
+        # ── Trade history & restart recovery ──────────────────────────────────
+        # Logs every crypto entry/exit to crypto_trades.json (separate from the
+        # stock engine's trades.json).  On restart, entry times are loaded back
+        # so reconcile_positions can show the correct hold duration in
+        # notifications rather than "held=5s" (the time since restart).
+        self._trade_history: Optional[TradeHistory] = trade_history
+        self._known_entry_times: dict = (
+            trade_history.get_latest_entry_times() if trade_history else {}
+        )
+        if self._known_entry_times:
+            log.info(
+                "CryptoTrader: recovered entry times for %d symbol(s) from history: %s",
+                len(self._known_entry_times),
+                list(self._known_entry_times.keys()),
+            )
 
     # ── Public read-only state ─────────────────────────────────────────────────
 
@@ -113,12 +133,15 @@ class CryptoTrader:
             self._trail_watermark[sym] = watermark
             self._stops[sym]           = (stop_price, tp_price)
             self._entry_price[sym]     = entry
-            self._entry_time[sym]      = datetime.now()
+            # Use persisted entry time when available so notifications show the
+            # real hold duration instead of "held=Xs" (time-since-restart).
+            self._entry_time[sym] = self._known_entry_times.get(sym) or datetime.now()
 
             log.info(
                 "CryptoTrader reconciled %s [%s] | entry=%.4f current=%.4f "
-                "SL=%.4f TP=%.4f",
+                "SL=%.4f TP=%.4f | entry_time=%s",
                 sym, side, entry, current, stop_price, tp_price,
+                self._entry_time[sym].strftime("%Y-%m-%d %H:%M:%S"),
             )
 
     # ── Position management ────────────────────────────────────────────────────
@@ -154,6 +177,18 @@ class CryptoTrader:
                 reason = "stop_loss"
             elif price >= wm * (1 + self._trail_pct):
                 reason = "trailing_stop"
+
+        # Max hold-time gate — fires after stop/TP/trail so those take priority.
+        if reason is None and self._max_hold_minutes:
+            held_since = self._entry_time.get(sym)
+            if held_since is not None:
+                held_min = (datetime.now() - held_since).total_seconds() / 60
+                if held_min >= self._max_hold_minutes:
+                    log.info(
+                        "CRYPTO max_hold %s — held %.0f min >= limit %.0f min; force-exiting.",
+                        sym, held_min, self._max_hold_minutes,
+                    )
+                    reason = "max_hold"
 
         if reason:
             self.close_position(pos, reason)
@@ -205,6 +240,13 @@ class CryptoTrader:
             enter_threshold=dec.enter_long,
             channels=self._channels,
         )
+        if self._trade_history is not None:
+            self._trade_history.log_entry(
+                symbol=sym, side="buy",
+                qty=round(notional / fill_price, 8),
+                price=fill_price,
+                score=dec.score, confidence=dec.confidence,
+            )
         return True
 
     # ── Short entry ────────────────────────────────────────────────────────────
@@ -272,6 +314,13 @@ class CryptoTrader:
             enter_threshold=dec.enter_short,
             channels=self._channels,
         )
+        if self._trade_history is not None:
+            self._trade_history.log_entry(
+                symbol=sym, side="sell",
+                qty=qty,
+                price=fill_price,
+                score=dec.score, confidence=dec.confidence,
+            )
         return True
 
     # ── Exit (works for both long and short) ───────────────────────────────────
@@ -339,6 +388,22 @@ class CryptoTrader:
             held_since=self._entry_time.get(sym),
             channels=self._channels,
         )
+        if self._trade_history is not None:
+            self._trade_history.log_exit(
+                symbol=sym, side=exit_side,
+                qty=filled_qty, price=exit_price,
+                entry_price=entry_price,
+                pnl=pnl, pnl_pct=pnl_pct,
+                score=0.0, confidence=0.0,
+                reason=reason,
+            )
+            self._trade_history.record(
+                symbol=sym, side=side,
+                qty=filled_qty,
+                entry_price=entry_price, exit_price=exit_price,
+                pnl=pnl, pnl_pct=pnl_pct,
+                reason=reason,
+            )
         self.cleanup(sym)
 
     def cleanup(self, sym: str) -> None:

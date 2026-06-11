@@ -131,6 +131,7 @@ def notify_order_entry(
     take_profit: Optional[float],
     regime_params: Optional[dict] = None,  # regime, adx, pp1_pct, eod_flatten …
     enter_threshold: Optional[float] = None,  # effective entry threshold used
+    position_size_info: Optional[dict] = None,  # sizing details from RiskManager
     channels: Iterable[str] = ("console",),
 ) -> None:
     """Rich order-entry notification with per-signal breakdown and regime context."""
@@ -181,13 +182,26 @@ def notify_order_entry(
     # Guard against enter_threshold=None — it has a default of None in the
     # function signature and older callers may not pass it.
     gate_str = f"(gate={enter_threshold:+.3f})" if enter_threshold is not None else ""
+    # Position-size rationale line
+    size_part = ""
+    if position_size_info:
+        _si = position_size_info
+        _ratio_tag = (
+            f" signal_ratio={_si['signal_ratio']:.0%}" if _si.get("signal_ratio", 1.0) < 0.999 else ""
+        )
+        size_part = (
+            f" | size: ${_si.get('notional', 0):.0f} of ${_si.get('equity', 0):.0f}"
+            f" (kelly={_si.get('kelly_pct', 0):.1f}%→target={_si.get('target_pct', 0):.1f}%"
+            f" eff_kelly={_si.get('eff_kelly', 0):.3f}"
+            f" regime_mult={_si.get('regime_mult', 1):.2f}x{_ratio_tag})"
+        )
     plain = (
         f"[{arrow}] {qty_str} {symbol} @ ~{price_str} | "
         f"score={agg_score:+.3f}{gate_str} "
         f"conf={confidence:.0%}(gate={min_confidence:.0%}){agree_tag} | "
         f"SL={_fmt_price(stop_loss, is_crypto) if stop_loss else '—'}{f'({sl_pct:+.1f}%)' if sl_pct else ''} "
         f"TP={_fmt_price(take_profit, is_crypto) if take_profit else '—'}{f'({tp_pct:+.1f}%)' if tp_pct else ''}"
-        f"{regime_part} | {signal_lines}"
+        f"{regime_part} | {signal_lines}{size_part}"
     )
 
     # ── Discord embed ─────────────────────────────────────────────────────
@@ -235,6 +249,24 @@ def notify_order_entry(
             {"name": "EOD Flatten", "value": eod_str    or "`—`",  "inline": True},
         ]
 
+    # Position-size row (only when sizing info is available)
+    if position_size_info:
+        _si = position_size_info
+        _scale_note = (
+            f" *(signal_ratio={_si['signal_ratio']:.0%})*"
+            if _si.get("signal_ratio", 1.0) < 0.999 else ""
+        )
+        fields.append({
+            "name":   "━━ Position Size ━━",
+            "value":  (
+                f"**${_si.get('notional', 0):.0f}** of ${_si.get('equity', 0):.0f} equity"
+                f" · kelly `{_si.get('kelly_pct', 0):.1f}%` → target `{_si.get('target_pct', 0):.1f}%`"
+                f" · eff_kelly `{_si.get('eff_kelly', 0):.3f}`"
+                f" · regime_mult `{_si.get('regime_mult', 1):.2f}x`{_scale_note}"
+            ),
+            "inline": False,
+        })
+
     # Signal breakdown — use raw scores for bars (full [-1,+1] range → readable bars)
     # Fall back to weighted components if raw_scores not available.
     display = raw_scores if raw_scores else components
@@ -278,20 +310,37 @@ def notify_order_entry(
             _notify_discord_embed(embed_payload)
 
 
-# Human-readable exit reason labels
-_REASON_DISPLAY: Dict[str, str] = {
-    "signal_reversed":    "🔄 Signal Reversed",
-    "eod_flatten":        "🌙 EOD Flatten",
-    "take_profit":        "🎯 Take Profit",
-    "partial_profit_1":   "💰 Partial Profit #1",
-    "partial_profit_2":   "💰 Partial Profit #2",
-    "stop":               "🛑 Stop Loss",
-    "stop_loss":          "🛑 Stop Loss",
-    "breakeven_stop":     "⚖️ Breakeven Stop",
-    "max_hold":           "⏱️ Max Hold Time",
-    "stale_position":     "⏰ Stale Position",
-    "trailing_stop":      "📉 Trailing Stop",
-}
+# Human-readable exit reason labels.  Matched by substring (ordered — first
+# hit wins) because reasons arrive in two formats: snake_case codes from the
+# crypto trader ("stop_loss") and free-text sentences from the stock
+# RiskManager ("stop price hit (px=…)").  Specific patterns come before the
+# generic "stop" catch-all.
+_REASON_KEYWORDS: list = [
+    ("breakeven",        "⚖️ Breakeven Stop"),
+    ("trailing",         "📉 Trailing Stop"),
+    ("partial_profit_1", "💰 Partial Profit #1"),
+    ("partial_profit_2", "💰 Partial Profit #2"),
+    ("time-decayed",     "🎯 Take Profit (time-decayed)"),
+    ("take_profit",      "🎯 Take Profit"),
+    ("take-profit",      "🎯 Take Profit"),
+    ("take profit",      "🎯 Take Profit"),
+    ("stop",             "🛑 Stop Loss"),
+    ("signal_reversed",  "🔄 Signal Reversed"),
+    ("signal reversed",  "🔄 Signal Reversed"),
+    ("eod",              "🌙 EOD Flatten"),
+    ("end-of-day",       "🌙 EOD Flatten"),
+    ("max_hold",         "⏱️ Max Hold Time"),
+    ("max hold",         "⏱️ Max Hold Time"),
+    ("stale",            "⏰ Stale Position"),
+]
+
+
+def _display_reason(reason: str) -> str:
+    r = reason.lower()
+    for key, label in _REASON_KEYWORDS:
+        if key in r:
+            return label
+    return f"📋 {reason.replace('_', ' ').title()}"
 
 
 def notify_order_exit(
@@ -306,10 +355,13 @@ def notify_order_exit(
     exit_price:  Optional[float] = None,
     held_since:  Optional[datetime] = None,
     partial_num: Optional[int] = None,     # 1 = first partial, 2 = second, None = full
+    exit_scores: Optional[Dict[str, float]] = None,  # raw signal scores at exit time
     channels: Iterable[str] = ("console",),
 ) -> None:
     """Rich exit notification with P&L, duration, and trade summary."""
     won        = pnl >= 0
+    is_crypto  = "/" in symbol
+    qty_str    = _fmt_qty(qty, symbol)
     is_partial = partial_num is not None
     if is_partial:
         icon  = "🔶"
@@ -320,25 +372,40 @@ def notify_order_exit(
         color = _COLOR_BUY if won else _COLOR_SELL
         label = "EXIT"
 
-    # Human-readable reason (fall back to raw code if not in map)
-    reason_display = _REASON_DISPLAY.get(reason.lower(), f"📋 {reason.replace('_', ' ').title()}")
+    # Human-readable reason (fall back to raw code if no keyword matches)
+    reason_display = _display_reason(reason)
 
-    # Duration
-    duration_str = None
+    # Duration — guard against negative elapsed (clock drift / DST edge case)
     if held_since is not None:
-        elapsed = (datetime.now() - held_since).total_seconds()
-        duration_str = _fmt_duration(elapsed)
+        elapsed = max(0.0, (datetime.now() - held_since).total_seconds())
+        duration_str: str = _fmt_duration(elapsed)
+    else:
+        # Entry time unknown — position was reconciled after a bot restart
+        # where the fill happened between the in-memory write and the file
+        # write, or was placed manually outside the bot.  Show "?" so it
+        # is visible in the notification rather than silently absent.
+        duration_str = "unknown"
 
     # ── Plain-text fallback ───────────────────────────────────────────────
     price_part = ""
     if entry_price and exit_price:
-        price_part = f" @ ${entry_price:.2f}→${exit_price:.2f}"
-    dur_part = f" held={duration_str}" if duration_str else ""
+        price_part = f" @ {_fmt_price(entry_price, is_crypto)}→{_fmt_price(exit_price, is_crypto)}"
+    dur_part = f" held={duration_str}"
+    # Exit signal scores — compact inline list sorted by magnitude
+    exit_sig_part = ""
+    if exit_scores:
+        _sig_items = "  ".join(
+            f"{src[:4]}={v:+.3f}"
+            for src, v in sorted(exit_scores.items(), key=lambda x: -abs(x[1]))
+            if abs(v) > 1e-4
+        )
+        if _sig_items:
+            exit_sig_part = f" | exit_signals: {_sig_items}"
     plain = (
-        f"[{icon} {label}] {side.upper()} {qty:.0f} {symbol}"
+        f"[{icon} {label}] {side.upper()} {qty_str} {symbol}"
         f"{price_part} | "
         f"PnL={pnl:+.2f} ({pnl_pct*100:+.2f}%) | "
-        f"reason={reason}{dur_part}"
+        f"reason={reason}{dur_part}{exit_sig_part}"
     )
 
     # ── Discord embed ─────────────────────────────────────────────────────
@@ -363,7 +430,7 @@ def notify_order_exit(
     if entry_price is not None and exit_price is not None:
         fields.append({
             "name":   "Price",
-            "value":  f"`${entry_price:.2f}` → `${exit_price:.2f}`",
+            "value":  f"`{_fmt_price(entry_price, is_crypto)}` → `{_fmt_price(exit_price, is_crypto)}`",
             "inline": True,
         })
 
@@ -378,8 +445,26 @@ def notify_order_exit(
     # Row 3 — side & qty (lower priority info)
     fields += [
         {"name": "Side", "value": f"`{side.upper()}`",  "inline": True},
-        {"name": "Qty",  "value": f"`{qty:.0f} sh`",    "inline": True},
+        {"name": "Qty",  "value": f"`{qty_str}`",       "inline": True},
     ]
+
+    # Exit signal scores row (when available)
+    if exit_scores:
+        _esc_lines = []
+        for src, v in sorted(exit_scores.items(), key=lambda x: -abs(x[1])):
+            if abs(v) <= 1e-4:
+                continue
+            bar_len = int(abs(v) * 16)
+            bar     = ("█" * bar_len).ljust(16, "░")
+            sign    = "▲" if v >= 0 else "▼"
+            emoji   = _SOURCE_EMOJI.get(src, "•")
+            _esc_lines.append(f"{emoji} **{src:<12}** {sign} `{v:+.3f}` `{bar}`")
+        if _esc_lines:
+            fields.append({
+                "name":   "━━ Signals at Exit ━━",
+                "value":  "\n".join(_esc_lines),
+                "inline": False,
+            })
 
     embed_payload = {
         "embeds": [{
