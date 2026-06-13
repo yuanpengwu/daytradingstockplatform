@@ -81,6 +81,9 @@ class SignalAggregator:
         min_confidence: float = 0.25,
         dead_signal_cycles: int = 3,
         require_ml_finrl_agreement: bool = False,
+        breadth_normalized_confidence: bool = False,
+        confidence_breadth_floor: float = 0.60,
+        opinion_epsilon: float = 0.05,
     ):
         # Normalize weights so they sum to 1.
         total = sum(max(0, float(v)) for v in weights.values()) or 1.0
@@ -97,6 +100,18 @@ class SignalAggregator:
         # models are BOTH opinionated yet point in opposite directions.  Two
         # independent learned models disagreeing is a strong "stay out" signal.
         self.require_ml_finrl_agreement: bool = require_ml_finrl_agreement
+
+        # ── Breadth-normalised confidence ──────────────────────────────────
+        # When True, per-symbol confidence is divided by the weight of sources
+        # that actually expressed a directional opinion this cycle (|score| >
+        # opinion_epsilon), floored at confidence_breadth_floor × total weight,
+        # rather than by the full configured weight.  This keeps the gate
+        # reachable when sources are structurally silent (fundamental/ORB on
+        # quiet days) while still requiring real conviction from whatever IS
+        # firing — and tightens automatically as more sources come online.
+        self._breadth_norm_conf:   bool  = bool(breadth_normalized_confidence)
+        self._conf_breadth_floor:  float = float(confidence_breadth_floor)
+        self._opinion_eps:         float = float(opinion_epsilon)
 
         # ── Dead-signal detection ──────────────────────────────────────────
         # A source is "dead" when it returns confidence = 0 for EVERY ticker
@@ -274,7 +289,23 @@ class SignalAggregator:
             #
             # This prevents a single strong sub-signal from masking opposing noise
             # from other sources and still reaching min_confidence.
-            weight_coverage = den / total_weight_denom if total_weight_denom > 0 else 0.0
+            if self._breadth_norm_conf:
+                # Denominator = weight of sources that voiced a directional
+                # opinion this cycle (not silent/neutral ones), floored so a
+                # lone strong signal isn't over-credited.  Numerator counts
+                # only those same opinionated sources.  Result = conviction-
+                # weighted average confidence among the signals actually talking.
+                op_weight   = 0.0
+                op_conf_num = 0.0
+                for s in sigs:
+                    w = effective_weights.get(s.source.value, 0.0)
+                    if w > 0 and s.confidence > 1e-9 and abs(s.score) > self._opinion_eps:
+                        op_weight   += w
+                        op_conf_num += w * s.confidence
+                denom = max(op_weight, self._conf_breadth_floor * total_weight_denom)
+                weight_coverage = op_conf_num / denom if denom > 0 else 0.0
+            else:
+                weight_coverage = den / total_weight_denom if total_weight_denom > 0 else 0.0
 
             # Gather sources that have a meaningful weight (≥5%) and actual opinion.
             # Use the raw signal score (not the weighted contribution) as the

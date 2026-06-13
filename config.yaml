@@ -41,9 +41,17 @@ signals:
   enter_long_threshold: 0.45
   enter_short_threshold: -0.45
   exit_threshold: 0.15
-  min_confidence: 0.35  # was 0.50 — unreachable: tech(0.30)+vwap(0.25) carry weak per-signal
-                        # conf while fund/orb sit dark, capping aggregate conf ~0.42. 0/1164
-                        # decisions cleared 0.45 on 2026-06-12 despite 369 score-gate passes.
+  min_confidence: 0.50  # strict gate is fair again now that confidence is breadth-normalised
+  # ── Adaptive (breadth-normalised) confidence ────────────────────────────────
+  # Confidence is divided by the weight of sources actually expressing a
+  # directional opinion this cycle — not the full configured weight — so
+  # permanently-silent sources (fundamental, ORB on quiet days) no longer cap
+  # aggregate confidence below the gate. The denominator is floored at
+  # confidence_breadth_floor × total weight so a lone strong signal can't be
+  # over-credited into a trade. See memory: confidence-gate-cap.
+  breadth_normalized_confidence: true
+  confidence_breadth_floor: 0.60   # never divide by < 60% of total weight
+  opinion_epsilon: 0.05            # |raw score| above this = a real directional opinion
   require_ml_finrl_agreement: false  # disabled — over-filters winners without quality gain
   technical:
     rsi_period: 45
