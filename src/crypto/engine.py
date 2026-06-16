@@ -100,6 +100,9 @@ class CryptoEngine:
             enter_long=entry_thresh,
             enter_short=entry_short,
             min_confidence=min_conf,
+            # High value disables dead-signal gate down-scaling: with only two
+            # crypto signals, a dead ML should skip the trade, not lower the bar.
+            dead_signal_cycles=int(ccfg.get("dead_signal_cycles", 3)),
         )
         self._short_notional: float = float(ccfg.get("short_max_notional", 300))
 

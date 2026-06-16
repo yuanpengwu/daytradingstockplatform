@@ -183,10 +183,17 @@ crypto:
   take_profit_pct: 0.10            # 10% take profit
   trailing_stop_pct: 0.04          # 4% trailing stop
   max_hold_minutes: 480            # force-exit any crypto position held longer than this
-  # Signal thresholds
-  min_confidence: 0.45             # crypto ML model trained on crypto → higher confidence
-  enter_long_threshold: 0.35
-  enter_short_threshold: -0.35     # mirror of enter_long (score ≤ this triggers short)
+  # Signal thresholds — tuned for higher-conviction entries (2026-06-13).
+  # Most past entries fired at conf 0.23–0.29 because, with only tech+ml
+  # signals, a dead ML let the dead-signal scaler drop the gate to ~0.225 and
+  # weak tech-only setups traded. We raise both gates AND disable the down-
+  # scaling (dead_signal_cycles huge) so confidence now requires real ML
+  # participation, not just a lone technical reading.
+  min_confidence: 0.50             # was 0.45 — require genuine conviction
+  enter_long_threshold: 0.40       # was 0.35 — require a stronger directional score
+  enter_short_threshold: -0.40     # mirror of enter_long (score ≤ this triggers short)
+  dead_signal_cycles: 100000       # effectively disable gate down-scaling for crypto:
+                                   # a missing ML should SKIP the trade, not lower the bar
   tech_score_gate: 0.05
   min_entry_adx: 20
   # Short selling — NOT supported by Alpaca for crypto (crypto is cash-only,
