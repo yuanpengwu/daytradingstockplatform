@@ -98,12 +98,36 @@ class Trader:
         if trade_history is not None:
             recovered = trade_history.get_latest_entry_times()
             if recovered:
-                self._entry_time.update(recovered)
-                log.info(
-                    "Trader: restored entry times for %d symbol(s) from transactions.json: %s",
-                    len(recovered),
-                    {s: t.strftime("%Y-%m-%d %H:%M") for s, t in recovered.items()},
-                )
+                # Cross-check against the broker: transactions.json can carry
+                # DANGLING entries whose exit was never logged (e.g. a position
+                # flattened by a Trader built without trade_history, like the
+                # dashboard emergency-sell, or closed outside the bot). Those
+                # would otherwise restore stale entry times for symbols we no
+                # longer hold. Only keep entry times for actually-held positions
+                # (mirrors CryptoTrader.reconcile_positions, which is broker-driven).
+                try:
+                    held = set(self.broker.get_stock_positions().keys())
+                except Exception as exc:
+                    log.warning(
+                        "Could not query broker positions to filter entry times "
+                        "(%s) — restoring all recovered times unfiltered.", exc,
+                    )
+                    held = set(recovered)
+                kept    = {s: t for s, t in recovered.items() if s in held}
+                skipped = sorted(set(recovered) - held)
+                if kept:
+                    self._entry_time.update(kept)
+                    log.info(
+                        "Trader: restored entry times for %d held symbol(s) from transactions.json: %s",
+                        len(kept),
+                        {s: t.strftime("%Y-%m-%d %H:%M") for s, t in kept.items()},
+                    )
+                if skipped:
+                    log.info(
+                        "Trader: skipped %d stale entry-time(s) for non-held symbols "
+                        "(dangling entries with no logged exit): %s",
+                        len(skipped), skipped,
+                    )
 
         # Restore stops / partial-exit progress / regime params from the last run.
         self._load_state()
