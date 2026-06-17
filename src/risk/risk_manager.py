@@ -173,6 +173,43 @@ class RiskManager:
 
             self._last_signal_ratio = self._signal_ratio
 
+    # ---------- stop / take-profit construction ----------
+    def compute_stops(
+        self,
+        price: float,
+        side: str,                 # "buy" or "sell"
+        atr: Optional[float],
+    ) -> Tuple[float, float]:
+        """Return (stop_loss, take_profit) absolute price levels for a position.
+
+        Always respects the configured % floors so ATR can only *tighten* the
+        stop (never widen it) and can never shrink the profit target below the
+        configured take_profit_pct.  This is the single source of truth for
+        stop construction: ``check_entry`` uses it when sizing a new order, and
+        ``Trader.reconcile_positions`` uses it to rebuild identical stops for a
+        position recovered from the broker after a restart.
+
+        Levels are rounded to 2 decimals (cents).
+        """
+        pct_stop = price * (1 - self.stop_pct) if side == "buy" else price * (1 + self.stop_pct)
+        pct_tp   = price * (1 + self.tp_pct)   if side == "buy" else price * (1 - self.tp_pct)
+
+        if self.use_atr and atr and atr > 0:
+            atr_stop = price - self.atr_stop_mult * atr if side == "buy" else price + self.atr_stop_mult * atr
+            atr_tp   = price + self.atr_tp_mult   * atr if side == "buy" else price - self.atr_tp_mult   * atr
+            if side == "buy":
+                # Tighter stop = higher price (closer to entry); larger TP = higher price
+                stop = max(atr_stop, pct_stop)
+                tp   = max(atr_tp,   pct_tp)
+            else:
+                # Tighter stop = lower price; larger TP = lower price
+                stop = min(atr_stop, pct_stop)
+                tp   = min(atr_tp,   pct_tp)
+        else:
+            stop = pct_stop
+            tp   = pct_tp
+        return round(stop, 2), round(tp, 2)
+
     # ---------- pre-trade check ----------
     def check_entry(
         self,
@@ -248,27 +285,9 @@ class RiskManager:
             return RiskDecision(False, f"sized position too small (qty={qty:.4f}) — increase equity or weights")
         qty = float(int(qty))
 
-        # Stops — always respect the configured % floors so ATR can only tighten
-        # stops (never widen them) and can never shrink the profit target below
-        # the configured take_profit_pct (currently 4 %).  This ensures partial
-        # exits at +1 % / +2.5 % always get a chance to fire before hard TP.
-        pct_stop = price * (1 - self.stop_pct) if side == "buy" else price * (1 + self.stop_pct)
-        pct_tp   = price * (1 + self.tp_pct)   if side == "buy" else price * (1 - self.tp_pct)
-
-        if self.use_atr and atr and atr > 0:
-            atr_stop = price - self.atr_stop_mult * atr if side == "buy" else price + self.atr_stop_mult * atr
-            atr_tp   = price + self.atr_tp_mult   * atr if side == "buy" else price - self.atr_tp_mult   * atr
-            if side == "buy":
-                # Tighter stop = higher price (closer to entry); larger TP = higher price
-                stop = max(atr_stop, pct_stop)
-                tp   = max(atr_tp,   pct_tp)
-            else:
-                # Tighter stop = lower price; larger TP = lower price
-                stop = min(atr_stop, pct_stop)
-                tp   = min(atr_tp,   pct_tp)
-        else:
-            stop = pct_stop
-            tp   = pct_tp
+        # Stops — see compute_stops() for the ATR-vs-% floor precedence.  Shared
+        # with reconcile_positions() so a restart rebuilds identical levels.
+        stop, tp = self.compute_stops(price, side, atr)
 
         log.info(
             "SIZE %s | qty=%g  notional=$%.0f  kelly=%.1f%%→target=%.1f%%"
@@ -281,8 +300,8 @@ class RiskManager:
             approved=True,
             reason="ok",
             qty=qty,
-            stop_loss=round(stop, 2),
-            take_profit=round(tp, 2),
+            stop_loss=stop,
+            take_profit=tp,
             position_info={
                 "kelly_pct":    round(kelly_pct * 100, 2),
                 "target_pct":   round(target_pct * 100, 2),
