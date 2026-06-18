@@ -457,6 +457,19 @@ class TradingEngine:
                 _dead_str, _scaled_str,
             )
 
+        # 2b. Reconcile broker-held positions that lost their in-memory stops /
+        #     entry time across a restart.  Rebuild ATR-or-% stops BEFORE
+        #     managing exits so a carried-over position isn't silently dropped
+        #     onto the wider % fallbacks.  Idempotent — skips tracked symbols.
+        _atr_by_sym = {
+            s: t.metadata.get("atr")
+            for s, t in tech_by_sym.items()
+            if t is not None and t.metadata.get("atr")
+        }
+        self.trader.reconcile_positions(
+            self.broker.get_stock_positions(), atr_by_sym=_atr_by_sym
+        )
+
         # 3. Manage open positions (uses latest decisions)
         self.trader.manage_open_positions(decisions)
 

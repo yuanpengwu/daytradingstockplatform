@@ -58,7 +58,15 @@ def emergency_sell(req: SellRequest):
     from src.risk.risk_manager import RiskManager
     
     risk = RiskManager(cfg.get("risk", {}))
-    trader = Trader(broker, risk, notify_channels=cfg.get("notifications", {}).get("channels", ["console"]))
+    # Pass trade_history so flatten exits are logged to transactions.json /
+    # trades.json. Without it, dashboard-flattened positions close at the broker
+    # but leave a DANGLING entry in transactions.json, which later restores a
+    # stale entry time on engine restart (see get_latest_entry_times).
+    trader = Trader(
+        broker, risk,
+        notify_channels=cfg.get("notifications", {}).get("channels", ["console"]),
+        trade_history=TradeHistory(path=str(_TRADES_PATH)),
+    )
     trader.flatten_all(req.reason)
     return {"status": "success", "message": "Liquidation orders sent!"}
 

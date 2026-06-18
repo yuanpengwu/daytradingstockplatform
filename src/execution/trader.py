@@ -98,12 +98,36 @@ class Trader:
         if trade_history is not None:
             recovered = trade_history.get_latest_entry_times()
             if recovered:
-                self._entry_time.update(recovered)
-                log.info(
-                    "Trader: restored entry times for %d symbol(s) from transactions.json: %s",
-                    len(recovered),
-                    {s: t.strftime("%Y-%m-%d %H:%M") for s, t in recovered.items()},
-                )
+                # Cross-check against the broker: transactions.json can carry
+                # DANGLING entries whose exit was never logged (e.g. a position
+                # flattened by a Trader built without trade_history, like the
+                # dashboard emergency-sell, or closed outside the bot). Those
+                # would otherwise restore stale entry times for symbols we no
+                # longer hold. Only keep entry times for actually-held positions
+                # (mirrors CryptoTrader.reconcile_positions, which is broker-driven).
+                try:
+                    held = set(self.broker.get_stock_positions().keys())
+                except Exception as exc:
+                    log.warning(
+                        "Could not query broker positions to filter entry times "
+                        "(%s) — restoring all recovered times unfiltered.", exc,
+                    )
+                    held = set(recovered)
+                kept    = {s: t for s, t in recovered.items() if s in held}
+                skipped = sorted(set(recovered) - held)
+                if kept:
+                    self._entry_time.update(kept)
+                    log.info(
+                        "Trader: restored entry times for %d held symbol(s) from transactions.json: %s",
+                        len(kept),
+                        {s: t.strftime("%Y-%m-%d %H:%M") for s, t in kept.items()},
+                    )
+                if skipped:
+                    log.info(
+                        "Trader: skipped %d stale entry-time(s) for non-held symbols "
+                        "(dangling entries with no logged exit): %s",
+                        len(skipped), skipped,
+                    )
 
         # Restore stops / partial-exit progress / regime params from the last run.
         self._load_state()
@@ -160,6 +184,84 @@ class Trader:
             log.info(
                 "Trader: restored stops/partial state for %d symbol(s): %s",
                 len(state), list(state),
+            )
+
+    # ---------- restart reconciliation ----------
+    def reconcile_positions(
+        self,
+        positions: Dict[str, Position],
+        atr_by_sym: Optional[Dict[str, float]] = None,
+    ) -> None:
+        """Rebuild stop/TP/entry tracking for broker positions missing from
+        in-memory state — the stock-side equivalent of
+        CryptoTrader.reconcile_positions.
+
+        On a mid-session restart, a position held at the broker can come up
+        with no in-memory stops: either trader_state.json was empty (it is only
+        written on entry/exit/partial events, so a position carried across the
+        restart was never persisted) or the position pre-dates the persistence
+        feature entirely.  Without reconciliation the engine silently falls
+        back to the wider config %-based stops (because ``_stops`` is empty) and
+        suppresses signal-exit (because ``_entry_time`` is None).
+
+        For each untracked position we reconstruct ATR-based stops when an ATR
+        is available for the symbol this cycle, otherwise the config % stops —
+        the same precedence RiskManager applies at entry (compute_stops) — and
+        restore the entry time recovered from transactions.json in __init__
+        (falling back to now()).  Reconstructed state is persisted immediately
+        so a subsequent restart reads it back from trader_state.json.
+
+        Idempotent: symbols already tracked in ``_stops`` are skipped, so this
+        is safe to call every cycle.
+        """
+        atr_by_sym = atr_by_sym or {}
+        reconciled: List[str] = []
+        for sym, pos in positions.items():
+            if sym in self._stops:
+                continue  # already tracking — nothing to rebuild
+            if pos.qty == 0:
+                continue
+            entry = pos.avg_entry_price or pos.current_price or 0.0
+            if entry <= 0:
+                continue
+
+            side = "buy" if pos.qty > 0 else "sell"
+            atr = atr_by_sym.get(sym)
+            stop, tp = self.risk.compute_stops(entry, side, atr)
+            self._stops[sym] = (stop, tp)
+
+            # Entry time: prefer the value restored from transactions.json in
+            # __init__; otherwise count from reconciliation so the min-hold /
+            # stale / max-hold gates have a reference point.
+            if sym not in self._entry_time:
+                self._entry_time[sym] = datetime.now()
+
+            # Seed the trailing watermark from the better of entry / current.
+            cur = pos.current_price or entry
+            if pos.qty > 0:
+                self._trail_high[sym] = max(entry, cur)
+            else:
+                self._trail_high[sym] = min(entry, cur)
+
+            # Original qty unknown after a restart — best estimate is what the
+            # broker currently reports; assume no partials have been taken.
+            self._entry_qty.setdefault(sym, abs(pos.qty))
+            self._partial_exits.setdefault(sym, 0)
+
+            reconciled.append(sym)
+            log.info(
+                "Trader reconciled %s [%s] | entry=%.2f current=%.2f "
+                "SL=%.2f TP=%.2f atr=%s entry_time=%s",
+                sym, side, entry, cur, stop, tp,
+                f"{atr:.4f}" if atr else "n/a",
+                self._entry_time[sym].strftime("%Y-%m-%d %H:%M:%S"),
+            )
+
+        if reconciled:
+            self._save_state()
+            log.info(
+                "Trader: reconciled %d untracked position(s) from broker: %s",
+                len(reconciled), reconciled,
             )
 
     # ---------- daily reset ----------
