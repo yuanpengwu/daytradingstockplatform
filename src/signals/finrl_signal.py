@@ -308,6 +308,25 @@ class FinRLSignal:
         vec_env = DummyVecEnv([lambda: env])
 
         incremental = self._model is not None and self._trained_at is not None
+
+        # ── Policy-collapse guard ──────────────────────────────────────────
+        # The entropy bonus that prevents premature convergence during the
+        # initial training also erodes the policy during daily incremental
+        # updates: on low-signal (choppy) days the entropy term dominates the
+        # loss and washes the action distribution toward 50/50, compounding
+        # day after day until |p_buy − p_sell| can never clear min_confidence.
+        # A light fine-tune cannot recover a flattened policy — full retrain.
+        collapse_floor = float(self.cfg.get("collapse_conf_floor", 0.25))
+        if incremental:
+            pre_conf = self._mean_policy_confidence(X)
+            if pre_conf is not None and pre_conf < collapse_floor:
+                log.warning(
+                    "FinRL: policy collapsed (mean |p_buy−p_sell| = %.3f < %.2f) "
+                    "— running full retrain instead of incremental update.",
+                    pre_conf, collapse_floor,
+                )
+                incremental = False
+
         timesteps   = self.daily_timesteps if incremental else self.total_timesteps
 
         log.info(
@@ -322,6 +341,10 @@ class FinRLSignal:
             # resetting the policy weights or optimiser state.
             try:
                 self._model.set_env(vec_env)
+                # Drop the entropy bonus for fine-tuning: the policy already
+                # explored during the initial training; keeping ent_coef high
+                # here flattens the action distribution on quiet days.
+                self._model.ent_coef = float(self.cfg.get("incremental_ent_coef", 0.005))
                 self._model.learn(
                     total_timesteps=timesteps,
                     reset_num_timesteps=False,   # preserve step counter & LR schedule
@@ -365,12 +388,36 @@ class FinRLSignal:
         self._trained_at = date.today()
         self._save_model()
 
+        # Post-train health metric — a healthy directional policy averages
+        # well above the collapse floor; watch this drift in the daily logs.
+        post_conf = self._mean_policy_confidence(X)
         log.info(
-            "FinRL training complete | mode=%s  device=%s  samples=%d  syms=%d",
+            "FinRL training complete | mode=%s  device=%s  samples=%d  syms=%d  mean_conf=%s",
             "incremental" if incremental else "full",
             device, len(X), n_syms,
+            f"{post_conf:.3f}" if post_conf is not None else "n/a",
         )
         return True
+
+    def _mean_policy_confidence(self, X: np.ndarray) -> Optional[float]:
+        """Mean |p_buy − p_sell| of the current policy over a feature sample.
+
+        ≈0 means the policy is uniform (collapsed); healthy models sit well
+        above the min_confidence gate on average.  Returns None on failure.
+        """
+        if self._model is None or len(X) == 0:
+            return None
+        try:
+            import torch
+            n   = min(len(X), 2048)
+            idx = np.linspace(0, len(X) - 1, n).astype(int)
+            obs = torch.tensor(X[idx].astype(np.float32), device=self._model.device)
+            with torch.no_grad():
+                probs = self._model.policy.get_distribution(obs).distribution.probs.cpu().numpy()
+            return float(np.mean(np.abs(probs[:, 1] - probs[:, 0])))
+        except Exception as e:
+            log.debug("FinRL confidence probe failed: %s", e)
+            return None
 
     # ── Inference ──────────────────────────────────────────────────────────
 

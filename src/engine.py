@@ -667,7 +667,10 @@ class TradingEngine:
         # Carry over any tickers with open positions that didn't make the fresh cut.
         # They stay in self.tickers so the engine keeps fetching their bars and can
         # fire stops / TPs / trailing exits normally.
-        open_syms = list(self.broker.get_positions().keys())
+        # Stock positions ONLY — get_positions() would leak crypto pairs
+        # (e.g. LINK/USD) into the stock universe, letting this engine apply
+        # stock exit rules to the crypto engine's positions.
+        open_syms = list(self.broker.get_stock_positions().keys())
         retained  = sorted(s for s in open_syms if s not in new_tickers)
         combined  = new_tickers + retained
 
