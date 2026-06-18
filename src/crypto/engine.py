@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import time
 from datetime import date
+from pathlib import Path
 from typing import Optional
 
 from ..brokers.base import BrokerBase
@@ -31,8 +32,12 @@ from ..signals.ml_model import MLSignal
 from ..signals.technical import TechnicalSignal
 from ..utils.logger import get_logger
 from ..utils.status_page import write_crypto_decisions
+from ..utils.trade_history import TradeHistory
 from .trader import CryptoTrader
 from .universe import CryptoUniverse
+
+# Project root: src/crypto/engine.py → src/crypto/ → src/ → project/
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 log = get_logger(__name__)
 
@@ -50,8 +55,15 @@ class CryptoEngine:
         self.broker = broker
         ccfg = config.get("crypto", {})
 
-        self.universe     = CryptoUniverse(ccfg)
-        self.trader       = CryptoTrader(broker, config)
+        self.universe       = CryptoUniverse(ccfg)
+        # Separate trade history file keeps crypto data isolated from stocks.
+        # Persisted entry times let reconcile_positions restore real hold
+        # durations after a bot restart instead of always showing "held=Xs".
+        self.trade_history  = TradeHistory(
+            path=str(_PROJECT_ROOT / "crypto_trades.json"),
+        )
+        self.trader         = CryptoTrader(broker, config,
+                                           trade_history=self.trade_history)
         self.poll_seconds = int(ccfg.get("poll_seconds", 60))
         self.enabled      = bool(ccfg.get("enabled", True))
 
@@ -217,10 +229,11 @@ class CryptoEngine:
             if d:
                 tag = "[H] " if sym in held else ""
                 dec_parts.append(f"{tag}{sym} {d.action} {d.score:+.2f}")
-        log.info("CryptoEngine cycle | %s", "  |  ".join(dec_parts) if dec_parts else "no signals")
+        log.info("CryptoEngine cycle  %s", "    ".join(dec_parts) if dec_parts else "no signals")
 
         # ── Pass 2: place new entries for untracked pairs ─────────────────────
-        crypto_exposure  = sum(pos.market_value for pos in positions.values())
+        # abs() so short positions (negative market value) count toward exposure.
+        crypto_exposure  = sum(abs(pos.market_value) for pos in positions.values())
         max_exposure_usd = equity * self._max_exposure
 
         for sym in self.universe.tickers:
@@ -248,15 +261,17 @@ class CryptoEngine:
                 continue
 
             try:
+                # Track notional placed THIS cycle so the exposure cap holds
+                # even when several pairs signal an entry in the same sweep.
                 if dec.action == "BUY":
                     notional = min(self._max_notional, equity * 0.05)
-                    if notional >= 10:
-                        self.trader.place_entry(sym, price, notional, dec)
+                    if notional >= 10 and self.trader.place_entry(sym, price, notional, dec):
+                        crypto_exposure += notional
 
                 elif dec.action == "SELL" and self.trader.shorting_enabled:
                     notional = min(self._short_notional, equity * 0.03)
-                    if notional >= 10:
-                        self.trader.place_short_entry(sym, price, notional, dec)
+                    if notional >= 10 and self.trader.place_short_entry(sym, price, notional, dec):
+                        crypto_exposure += notional
 
             except Exception as e:
                 log.warning("CryptoEngine entry failed for %s: %s", sym, e, exc_info=True)

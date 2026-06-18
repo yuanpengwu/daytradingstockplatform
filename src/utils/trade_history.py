@@ -78,7 +78,12 @@ class TradeRecord:
 class TradeHistory:
     def __init__(self, path: str = "trades.json"):
         self._path       = Path(path)
-        self._tx_path    = self._path.with_name("transactions.json")
+        # Derive the transactions file by replacing "trades" → "transactions" in
+        # the filename so that crypto_trades.json → crypto_transactions.json and
+        # trades.json → transactions.json (separate files, no cross-contamination).
+        self._tx_path    = self._path.with_name(
+            self._path.name.replace("trades", "transactions")
+        )
         self._trades: List[TradeRecord] = []
         self._load()
 
@@ -182,26 +187,59 @@ class TradeHistory:
         )
 
     def get_latest_entry_times(self) -> dict:
-        """Return {symbol: datetime} of the most-recent entry transaction per symbol.
+        """Return {symbol: datetime} for symbols that appear to have an OPEN position.
 
         Used by Trader.__init__ to restore _entry_time after an engine restart so
-        the min_hold_minutes gate isn't bypassed for reconciled positions.
+        min_hold_minutes / max_hold_minutes / stale_exit gates apply correctly.
+
+        A position is considered open when its most-recent entry transaction is
+        MORE RECENT than its most-recent exit transaction.  Symbols whose last
+        transaction was an exit are excluded — this prevents a stale entry time
+        from 3 months ago being loaded for a symbol that was since closed, which
+        would cause max_hold_minutes to fire immediately on the next restart and
+        force-exit the newly-opened position.
+
+        Partial exits (type="exit") do not close the position as long as a later
+        entry exists for the same symbol — handled correctly by the ISO-8601
+        timestamp string comparison (lexicographic order == chronological order
+        for same-timezone naive timestamps).
         """
         if not self._tx_path.exists():
             return {}
         try:
             with open(self._tx_path, "r", encoding="utf-8") as f:
                 rows = json.load(f)
-            result: dict = {}
+
+            last_entry_ts: dict = {}   # sym → latest "entry" ISO-8601 string
+            last_exit_ts:  dict = {}   # sym → latest "exit"  ISO-8601 string
+
             for row in rows:
-                if row.get("type") == "entry":
-                    sym = row.get("symbol")
-                    ts_str = row.get("timestamp")
-                    if sym and ts_str:
-                        try:
-                            result[sym] = datetime.fromisoformat(ts_str)
-                        except Exception:
-                            pass
+                sym     = row.get("symbol")
+                ts_str  = row.get("timestamp")
+                tx_type = row.get("type")
+                if not (sym and ts_str and tx_type):
+                    continue
+                if tx_type == "entry":
+                    # Keep the LAST (most-recent) entry per symbol — file is
+                    # append-only so later rows are chronologically later.
+                    if sym not in last_entry_ts or ts_str > last_entry_ts[sym]:
+                        last_entry_ts[sym] = ts_str
+                elif tx_type == "exit":
+                    if sym not in last_exit_ts or ts_str > last_exit_ts[sym]:
+                        last_exit_ts[sym] = ts_str
+
+            result: dict = {}
+            for sym, entry_ts_str in last_entry_ts.items():
+                exit_ts_str = last_exit_ts.get(sym)
+                # Exclude symbols whose most-recent transaction was an exit
+                # (the position is closed, no point restoring a stale entry time).
+                if exit_ts_str and exit_ts_str > entry_ts_str:
+                    continue
+                try:
+                    result[sym] = datetime.fromisoformat(entry_ts_str)
+                except Exception:
+                    pass
+
             return result
         except Exception as e:
             log.warning("Could not read entry times from transactions.json: %s", e)

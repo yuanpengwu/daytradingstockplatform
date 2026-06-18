@@ -111,10 +111,6 @@ class TradingEngine:
         self.market_hours_only = bool(sched.get("trade_only_market_hours", True))
         self.status_path = sched.get("status_page", "status.html")
 
-        # Midday dead zone — no new entries, but positions are still managed.
-        self._dead_zone_start: dtime = self._parse_time(sched.get("no_trade_window_start", "11:30"))
-        self._dead_zone_end:   dtime = self._parse_time(sched.get("no_trade_window_end",   "14:00"))
-
         # Pre-close entry cutoff — block new entries N minutes before the
         # close buffer (15:50 − 30 min = no new entries after 15:20 ET).
         # Prevents zero-P&L "last bar" trades that have no time to move.
@@ -280,7 +276,13 @@ class TradingEngine:
         today = now_ny.date()
         if self._last_day_started != today:
             self.risk.begin_day(self.broker.get_equity())
-            self.trader.begin_day()
+            # Pass the previous trading day so the performance tracker can run
+            # its end-of-day evaluation (dynamic exclusion of weak symbols).
+            _prev_day = (
+                self._last_day_started.strftime("%Y-%m-%d")
+                if self._last_day_started else None
+            )
+            self.trader.begin_day(_prev_day)
 
             # Train / retrain the local ML model at day-start using the most
             # recent historical bars.  This is a one-time ~2s cost per day;
@@ -346,15 +348,6 @@ class TradingEngine:
             self.trader.flatten_eod_eligible("eod_flatten")
             return {}
 
-        # ── Dead-zone gate: no new entries, positions still managed ──────────
-        in_dead_zone = self._in_dead_zone(now_ny)
-        if in_dead_zone:
-            log.info(
-                "DEAD ZONE (%s ET) — managing open positions only; no new entries until %s.",
-                now_ny.strftime("%H:%M"),
-                self._dead_zone_end.strftime("%H:%M"),
-            )
-
         # 1. Collect signals
         spy_bars = self.market.get_bars("SPY")
         market_multiplier, macro_reason = self.macro.evaluate(spy_bars)
@@ -384,8 +377,8 @@ class TradingEngine:
                         today_bars = bars[bar_index.tz_convert(NY).date == today]
                     else:
                         today_bars = bars[bar_index.date == today]
-                    if not today_bars.empty and "open" in today_bars.columns:
-                        self.trader.update_day_open(sym, float(today_bars["open"].iloc[0]))
+                    if not today_bars.empty and "Open" in today_bars.columns:
+                        self.trader.update_day_open(sym, float(today_bars["Open"].iloc[0]))
                 except Exception as _e:
                     log.debug("Could not extract day-open for %s: %s", sym, _e)
 
@@ -432,11 +425,33 @@ class TradingEngine:
         # when ML / sentiment / fundamental are offline.
         self.risk.update_dead_signal_ratio(self.agg.threshold_ratio)
 
+        _dead  = self.agg.dead_sources
+        _ratio = self.agg.threshold_ratio
         for sym, d in decisions.items():
+            _r          = d.raw_scores
+            _score_ok   = "✓" if (d.score >= d.enter_long or d.score <= d.enter_short) else "✗"
+            _conf_ok    = "✓" if d.confidence >= d.min_confidence else "✗"
+            _agree_tag  = "✓" if d.agreement_ok else "✗DISAGREE"
+            _dead_str   = f" dead={sorted(_dead)} ratio={_ratio:.0%}" if _dead else ""
+            _scaled_str = " [scaled]" if _ratio < 1.0 - 1e-4 else ""
             log.info(
-                "DECISION %s | score=%+.3f conf=%.2f action=%s regime=%s comp=%s",
-                sym, d.score, d.confidence, d.action, regime,
-                {k: round(v, 3) for k, v in d.components.items()},
+                "DECISION %s | %s"
+                "  score=%+.3f(gate=%+.3f%s)"
+                "  conf=%.2f(gate=%.2f%s)"
+                "  agree=%s"
+                "  |  tech=%+.3f  sent=%+.3f  fund=%+.3f  ml=%+.3f"
+                "  finrl=%+.3f  orb=%+.3f  vwap=%+.3f"
+                "  |  regime=%s  macro=%.2fx%s%s",
+                sym, d.action,
+                d.score, d.enter_long, _score_ok,
+                d.confidence, d.min_confidence, _conf_ok,
+                _agree_tag,
+                _r.get("technical",   0.0), _r.get("sentiment",   0.0),
+                _r.get("fundamental", 0.0), _r.get("ml",          0.0),
+                _r.get("finrl",       0.0), _r.get("orb",         0.0),
+                _r.get("vwap_bounce", 0.0),
+                regime, market_multiplier,
+                _dead_str, _scaled_str,
             )
 
         # 3. Manage open positions (uses latest decisions)
@@ -447,27 +462,23 @@ class TradingEngine:
             from datetime import date as _date
             import bisect as _bisect
             for sym in self.trader.recent_stop_losses:
-                # Ban the symbol for the rest of today + all of tomorrow.
-                # We store ban_until = today + 2 calendar days so the expiry
-                # check (d <= today) lifts the ban the day after tomorrow's open.
-                ban_until = today + timedelta(days=2)
+                # Ban the symbol for the rest of today + the next trading day.
+                # ban_until is exclusive (expiry check: d <= today lifts it).
+                # Friday stops skip the weekend so Monday is still banned.
+                _days_ahead = 4 if today.weekday() == 4 else 2
+                ban_until = today + timedelta(days=_days_ahead)
                 self._cooloff_until[sym] = ban_until
                 log.info(
                     "COOLOFF: %s stopped out — banned until %s (next trading day).",
                     sym, ban_until,
                 )
 
-        # 4. Consider new entries — subject to dead zone, regime, and RS filter.
+        # 4. Consider new entries — subject to regime and RS filter.
         for sym, d in decisions.items():
             if d.action == "HOLD":
                 continue
 
-            # Gate A: midday dead zone — no new entries.
-            if in_dead_zone:
-                log.debug("SKIP entry %s — dead zone active.", sym)
-                continue
-
-            # Gate A2: pre-close entry cutoff — no new entries after 15:20 ET.
+            # Gate A: pre-close entry cutoff — no new entries after 15:20 ET.
             # Prevents entering positions too late in the day to move meaningfully.
             if now_ny.time() >= self._entry_cutoff:
                 log.debug("SKIP entry %s — past pre-close cutoff (%s ET).", sym, self._entry_cutoff.strftime("%H:%M"))
@@ -601,11 +612,6 @@ class TradingEngine:
         close_t = dtime(16, 0)
         end = (datetime.combine(now_ny.date(), close_t) - timedelta(minutes=self.close_buffer_min)).time()
         return end <= now_ny.time() <= close_t
-
-    def _in_dead_zone(self, now_ny: datetime) -> bool:
-        """Return True during the midday low-volume window where new entries are blocked."""
-        t = now_ny.time()
-        return self._dead_zone_start <= t < self._dead_zone_end
 
     def _compute_rs(self, symbol: str, bars_by_sym: dict, spy_bars) -> float:
         """Relative strength of symbol vs SPY over the last rs_lookback bars.

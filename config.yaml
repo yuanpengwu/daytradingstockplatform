@@ -124,7 +124,7 @@ risk:
   use_atr_stops: true
   atr_stop_multiplier: 13.0
   atr_tp_multiplier: 4.0
-  shorting_enabled: true           # enable short selling for stocks
+  shorting_enabled: false          # short selling disabled
   short_regimes:
   - trending_bear
   - high_volatility
@@ -155,8 +155,6 @@ schedule:
   market_close_buffer_minutes: 10
   trade_only_market_hours: true
   no_entry_before_close_minutes: 5    # EOD flush at close, not 30 min early
-  no_trade_window_start: '11:30'
-  no_trade_window_end: '14:00'
 crypto:
   enabled: true
   tickers:                         # 24/7 Alpaca crypto pairs
@@ -174,6 +172,7 @@ crypto:
   per_trade_stop_loss_pct: 0.05   # 5% stop loss (wider than stocks)
   take_profit_pct: 0.10            # 10% take profit
   trailing_stop_pct: 0.04          # 4% trailing stop
+  max_hold_minutes: 480            # force-exit any crypto position held longer than this
   # Signal thresholds
   min_confidence: 0.45             # crypto ML model trained on crypto → higher confidence
   enter_long_threshold: 0.35

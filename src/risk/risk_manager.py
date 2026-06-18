@@ -50,6 +50,7 @@ class RiskDecision:
     qty: float = 0.0
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    position_info: dict = field(default_factory=dict)  # sizing details for notifications
 
 
 class RiskManager:
@@ -269,12 +270,28 @@ class RiskManager:
             stop = pct_stop
             tp   = pct_tp
 
+        log.info(
+            "SIZE %s | qty=%g  notional=$%.0f  kelly=%.1f%%→target=%.1f%%"
+            "  eff_kelly=%.3f  regime_mult=%.2fx  signal_ratio=%.0f%%",
+            symbol, qty, notional,
+            kelly_pct * 100, target_pct * 100,
+            eff_kelly, self.regime_size_mult, self._signal_ratio * 100,
+        )
         return RiskDecision(
             approved=True,
             reason="ok",
             qty=qty,
             stop_loss=round(stop, 2),
             take_profit=round(tp, 2),
+            position_info={
+                "kelly_pct":    round(kelly_pct * 100, 2),
+                "target_pct":   round(target_pct * 100, 2),
+                "notional":     round(notional, 2),
+                "equity":       round(equity, 2),
+                "eff_kelly":    round(eff_kelly, 4),
+                "regime_mult":  round(self.regime_size_mult, 2),
+                "signal_ratio": round(self._signal_ratio, 3),
+            },
         )
 
     # ---------- helpers ----------
