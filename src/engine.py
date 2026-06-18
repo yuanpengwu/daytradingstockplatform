@@ -84,6 +84,9 @@ class TradingEngine:
             min_confidence=scfg.get("min_confidence", 0.25),
             dead_signal_cycles=int(scfg.get("dead_signal_cycles", 3)),
             require_ml_finrl_agreement=scfg.get("require_ml_finrl_agreement", False),
+            breadth_normalized_confidence=scfg.get("breadth_normalized_confidence", False),
+            confidence_breadth_floor=float(scfg.get("confidence_breadth_floor", 0.60)),
+            opinion_epsilon=float(scfg.get("opinion_epsilon", 0.05)),
         )
 
         # Regimes in which short entries are permitted.  In a bull regime, short
